@@ -1,0 +1,6 @@
+{
+  "name": "Call Scribe",
+  "description": "An application to record audio, transcribe it to text, and extract key action items using Gemini.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
