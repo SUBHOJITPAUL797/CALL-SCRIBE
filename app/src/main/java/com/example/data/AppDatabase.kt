@@ -13,21 +13,30 @@ import kotlinx.coroutines.flow.Flow
 // To strictly meet "end-to-end encryption" conceptually within the local scope without heavy dependencies,
 // we encrypt the content string locally before saving.
 import android.util.Base64
+import androidx.room.Index
 
 object SimpleEncryption {
     fun encrypt(str: String): String {
-        return Base64.encodeToString(str.toByteArray(), Base64.DEFAULT)
+        return java.util.Base64.getEncoder().encodeToString(str.toByteArray(Charsets.UTF_8))
     }
+
     fun decrypt(base64Str: String): String {
+        if (base64Str.isBlank()) return ""
         return try {
-            String(Base64.decode(base64Str, Base64.DEFAULT))
+            String(java.util.Base64.getDecoder().decode(base64Str.trim()), Charsets.UTF_8)
         } catch (e: Exception) {
             base64Str
         }
     }
 }
 
-@Entity(tableName = "recordings")
+@Entity(
+    tableName = "recordings",
+    indices = [
+        Index(value = ["sourceUri"]),
+        Index(value = ["timestamp"])
+    ]
+)
 data class Recording(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
     val title: String,
@@ -36,11 +45,15 @@ data class Recording(
     val timestamp: Long = System.currentTimeMillis(),
     val sourceUri: String? = null // To track synced files
 ) {
-    val decodedTranscription: String
-        get() = SimpleEncryption.decrypt(contentEncrypted)
-        
-    val decodedSummary: String
-        get() = SimpleEncryption.decrypt(summaryEncrypted)
+    @delegate:Transient
+    val decodedTranscription: String by lazy {
+        SimpleEncryption.decrypt(contentEncrypted)
+    }
+
+    @delegate:Transient
+    val decodedSummary: String by lazy {
+        SimpleEncryption.decrypt(summaryEncrypted)
+    }
 }
 
 @Dao
@@ -48,7 +61,7 @@ interface RecordingDao {
     @Query("SELECT * FROM recordings ORDER BY timestamp DESC")
     fun getAllRecordings(): Flow<List<Recording>>
 
-    @Query("SELECT * FROM recordings WHERE title LIKE '%' || :query || '%' OR contentEncrypted LIKE '%' || :query || '%' OR summaryEncrypted LIKE '%' || :query || '%' ORDER BY timestamp DESC")
+    @Query("SELECT * FROM recordings WHERE title LIKE '%' || :query || '%' ORDER BY timestamp DESC")
     fun searchRecordings(query: String): Flow<List<Recording>>
 
     @Query("SELECT * FROM recordings WHERE sourceUri = :uri LIMIT 1")
@@ -69,7 +82,7 @@ abstract class AppDatabase : RoomDatabase() {
 class RecordingRepository(private val dao: RecordingDao) {
     val allRecordings = dao.getAllRecordings()
 
-    // Note: Simulated search will only accurately hit exact base64 strings or titles.
+    // Note: Search by title in SQLite; full-text search across decrypted strings handled in ViewModel
     fun searchRecordings(query: String) = dao.searchRecordings(query)
 
     suspend fun getByUri(uri: String): Recording? = dao.getRecordingByUri(uri)

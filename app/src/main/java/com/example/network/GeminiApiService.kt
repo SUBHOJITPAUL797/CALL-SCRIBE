@@ -50,7 +50,8 @@ data class GenerateContentResponse(
 
 @JsonClass(generateAdapter = true)
 data class Candidate(
-    val content: Content? = null
+    val content: Content? = null,
+    val finishReason: String? = null
 )
 
 interface GeminiApiService {
@@ -64,11 +65,11 @@ interface GeminiApiService {
 object RetrofitClient {
     private const val BASE_URL = "https://generativelanguage.googleapis.com/"
 
-    // Increased timeout for audio processing
     private val okHttpClient = OkHttpClient.Builder()
-        .connectTimeout(120, TimeUnit.SECONDS)
+        .connectTimeout(90, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
         .writeTimeout(120, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
 
     val service: GeminiApiService by lazy {
@@ -81,9 +82,71 @@ object RetrofitClient {
     }
 }
 
+object GeminiResponseParser {
+    private val transcriptionPattern = Regex(
+        """(?i)(?:\*{1,2}|#{1,4}\s*)?(?:TRANSCRIPTION|TRANSCRIPT)(?:\*{1,2})?:?(?:\*{1,2})?\s*"""
+    )
+    private val summaryPattern = Regex(
+        """(?i)(?:\*{1,2}|#{1,4}\s*)?(?:SUMMARY|ACTION ITEMS|KEY TAKEAWAYS|SUMMARY & ACTION ITEMS)(?:\*{1,2})?:?(?:\*{1,2})?\s*"""
+    )
+
+    fun parseAudioAnalysis(fullText: String): Pair<String, String> {
+        val trimmed = fullText.trim()
+        if (trimmed.isBlank()) {
+            return Pair("No speech detected.", "No summary available.")
+        }
+
+        val summaryMatch = summaryPattern.find(trimmed)
+        val transcriptionMatch = transcriptionPattern.find(trimmed)
+
+        if (summaryMatch != null && transcriptionMatch != null) {
+            val transcriptionStart = transcriptionMatch.range.last + 1
+            val summaryHeaderStart = summaryMatch.range.first
+            val summaryStart = summaryMatch.range.last + 1
+
+            if (summaryHeaderStart > transcriptionStart) {
+                val transcription = trimmed.substring(transcriptionStart, summaryHeaderStart).trim()
+                val summary = trimmed.substring(summaryStart).trim()
+                return Pair(
+                    transcription.ifBlank { "No transcription content." },
+                    summary.ifBlank { "No summary generated." }
+                )
+            }
+        } else if (summaryMatch != null) {
+            val summaryHeaderStart = summaryMatch.range.first
+            val summaryStart = summaryMatch.range.last + 1
+            val transcription = trimmed.substring(0, summaryHeaderStart).trim()
+            val summary = trimmed.substring(summaryStart).trim()
+            return Pair(
+                transcription.ifBlank { "Transcription not separated." },
+                summary.ifBlank { "No summary generated." }
+            )
+        }
+
+        // Fallback: Check if response has clear paragraphs
+        val paragraphs = trimmed.split("\n\n").filter { it.isNotBlank() }
+        return if (paragraphs.size > 1) {
+            Pair(paragraphs.dropLast(1).joinToString("\n\n").trim(), paragraphs.last().trim())
+        } else {
+            Pair(trimmed, "No separate summary section generated.")
+        }
+    }
+}
+
 class GeminiRepository {
+    fun isApiKeyConfigured(): Boolean {
+        val key = BuildConfig.GEMINI_API_KEY
+        return key.isNotBlank() &&
+               !key.equals("MY_GEMINI_API_KEY", ignoreCase = true) &&
+               !key.equals("YOUR_API_KEY", ignoreCase = true) &&
+               key.length > 10
+    }
+
     suspend fun summarizeTranscription(transcription: String): String = withContext(Dispatchers.IO) {
         val apiKey = BuildConfig.GEMINI_API_KEY
+        if (!isApiKeyConfigured()) {
+            return@withContext "Error: Gemini API key is not configured. Please set GEMINI_API_KEY in .env"
+        }
         val request = GenerateContentRequest(
             systemInstruction = Content(
                 parts = listOf(Part(text = "You are a helpful assistant that summarizes call transcripts into key action items. Return a clear, concise bulleted list of action items, or a short paragraph summary if no clear action items exist. Do not exceed 200 words. Format clearly."))
@@ -97,12 +160,32 @@ class GeminiRepository {
             val response = RetrofitClient.service.generateContent(apiKey, request)
             response.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text ?: "No summary generated."
         } catch (e: Exception) {
-            "Error generating summary: ${e.localizedMessage}"
+            "Error generating summary: ${e.localizedMessage ?: e.message}"
         }
     }
 
-    suspend fun transcribeAndSummarizeAudio(base64Audio: String, mimeType: String): Pair<String, String>? = withContext(Dispatchers.IO) {
+    suspend fun transcribeAndSummarizeAudio(
+        base64Audio: String,
+        mimeType: String
+    ): Result<Pair<String, String>> = withContext(Dispatchers.IO) {
         val apiKey = BuildConfig.GEMINI_API_KEY
+        if (!isApiKeyConfigured()) {
+            return@withContext Result.failure(
+                IllegalStateException("Gemini API key is not configured in .env file.")
+            )
+        }
+
+        val normalizedMime = when {
+            mimeType.startsWith("audio/mp3") || mimeType.contains("mpeg") || mimeType.endsWith("mp3") -> "audio/mp3"
+            mimeType.startsWith("audio/m4a") || mimeType.startsWith("audio/mp4") || mimeType.endsWith("m4a") -> "audio/mp4"
+            mimeType.startsWith("audio/wav") || mimeType.startsWith("audio/x-wav") || mimeType.endsWith("wav") -> "audio/wav"
+            mimeType.startsWith("audio/ogg") || mimeType.startsWith("audio/opus") || mimeType.endsWith("ogg") || mimeType.endsWith("opus") -> "audio/ogg"
+            mimeType.startsWith("audio/aac") || mimeType.endsWith("aac") -> "audio/aac"
+            mimeType.startsWith("audio/flac") || mimeType.endsWith("flac") -> "audio/flac"
+            mimeType.startsWith("audio/3gpp") || mimeType.startsWith("video/3gpp") || mimeType.startsWith("audio/amr") || mimeType.endsWith("3gp") || mimeType.endsWith("amr") -> "audio/3gpp"
+            else -> "audio/mp3"
+        }
+
         val request = GenerateContentRequest(
             systemInstruction = Content(
                 parts = listOf(Part(text = "You are an assistant. The user provides an audio file. You must first output 'TRANSCRIPTION:' followed by a full text transcription of the audio. Then output 'SUMMARY:' followed by a 150-word action-item summary of the transcript. Do NOT stray from this format."))
@@ -110,29 +193,28 @@ class GeminiRepository {
             contents = listOf(Content(
                 parts = listOf(
                     Part(text = "Please transcribe and summarize this meeting recording."),
-                    Part(inlineData = InlineData(mimeType = mimeType, data = base64Audio))
+                    Part(inlineData = InlineData(mimeType = normalizedMime, data = base64Audio))
                 )
             )),
             generationConfig = GenerationConfig(temperature = 0.2f)
         )
         try {
             val response = RetrofitClient.service.generateContent(apiKey, request)
-            val fullText = response.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text ?: return@withContext null
-            
-            // Basic parsing of the structured output
-            val transcriptionLabelPos = fullText.indexOf("TRANSCRIPTION:")
-            val summaryLabelPos = fullText.indexOf("SUMMARY:")
-
-            if (transcriptionLabelPos != -1 && summaryLabelPos != -1 && summaryLabelPos > transcriptionLabelPos) {
-                val transcription = fullText.substring(transcriptionLabelPos + 14, summaryLabelPos).trim()
-                val summary = fullText.substring(summaryLabelPos + 8).trim()
-                Pair(transcription, summary)
-            } else {
-                Pair(fullText, "Summary not properly formatted.")
+            val fullText = response.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
+            if (fullText.isNullOrBlank()) {
+                val finishReason = response.candidates?.firstOrNull()?.finishReason
+                return@withContext Result.failure(
+                    Exception(if (finishReason != null) "Generation stopped: $finishReason" else "No response from Gemini API.")
+                )
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
-            null
+            val parsed = GeminiResponseParser.parseAudioAnalysis(fullText)
+            Result.success(parsed)
+        } catch (e: retrofit2.HttpException) {
+            val errorBody = try { e.response()?.errorBody()?.string() } catch (_: Exception) { null }
+            val message = if (!errorBody.isNullOrBlank()) "API Error (${e.code()}): $errorBody" else "HTTP error: ${e.code()} ${e.message()}"
+            Result.failure(Exception(message, e))
+        } catch (e: Throwable) {
+            Result.failure(Exception(e.localizedMessage ?: "Unknown error occurred during analysis", e))
         }
     }
 }
