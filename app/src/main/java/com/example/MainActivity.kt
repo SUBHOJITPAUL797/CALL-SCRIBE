@@ -48,7 +48,13 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.SystemUpdate
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import com.example.update.AppUpdateManager
 
 class MainActivity : ComponentActivity() {
@@ -56,13 +62,16 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val appContainer = DefaultAppContainer
+        val apiKeyManager = appContainer.getApiKeyManager(this)
+        val geminiRepository = appContainer.getGeminiRepository(this)
         setContent {
             MyApplicationTheme {
                 val viewModel: CallViewModel = viewModel(
                     factory = CallViewModelFactory(
                         appContainer.getRepository(this),
-                        appContainer.geminiRepository,
-                        appContainer.gitHubUpdateRepository
+                        geminiRepository,
+                        appContainer.gitHubUpdateRepository,
+                        apiKeyManager
                     )
                 )
 
@@ -95,12 +104,29 @@ fun CallScribeApp(viewModel: CallViewModel) {
     val recordings by viewModel.recordings.collectAsStateWithLifecycle()
     val isSyncing by viewModel.isSyncing.collectAsStateWithLifecycle()
     val syncStatus by viewModel.syncStatus.collectAsStateWithLifecycle()
+    val syncProgress by viewModel.syncProgress.collectAsStateWithLifecycle()
+    val syncProcessedCount by viewModel.syncProcessedCount.collectAsStateWithLifecycle()
+    val syncTotalCount by viewModel.syncTotalCount.collectAsStateWithLifecycle()
+    val syncErrorCount by viewModel.syncErrorCount.collectAsStateWithLifecycle()
+
+    val showApiKeyDialog by viewModel.showApiKeyDialog.collectAsStateWithLifecycle()
+    val selectedFolderForLimit by viewModel.selectedFolderForLimit.collectAsStateWithLifecycle()
+    val folderTotalRecordings by viewModel.folderTotalRecordings.collectAsStateWithLifecycle()
 
     val updateInfo by viewModel.updateInfo.collectAsStateWithLifecycle()
     val isCheckingUpdate by viewModel.isCheckingUpdate.collectAsStateWithLifecycle()
     val isDownloadingUpdate by viewModel.isDownloadingUpdate.collectAsStateWithLifecycle()
     val downloadProgress by viewModel.downloadProgress.collectAsStateWithLifecycle()
     val updateStatusMessage by viewModel.updateStatusMessage.collectAsStateWithLifecycle()
+
+    var enteredApiKey by remember { mutableStateOf("") }
+    var apiKeyVisible by remember { mutableStateOf(false) }
+
+    LaunchedEffect(showApiKeyDialog) {
+        if (showApiKeyDialog) {
+            enteredApiKey = viewModel.getApiKey()
+        }
+    }
 
     LaunchedEffect(updateStatusMessage) {
         updateStatusMessage?.let { msg ->
@@ -125,8 +151,162 @@ fun CallScribeApp(viewModel: CallViewModel) {
             } catch (_: Exception) {
                 // Ignore fallback
             }
-            viewModel.syncFolder(context, uri)
+            viewModel.onFolderSelected(context, uri)
         }
+    }
+
+    // API Key Dialog
+    if (showApiKeyDialog) {
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissApiKeyDialog() },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Key, contentDescription = null, tint = Color.Black)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Gemini API Key", fontWeight = FontWeight.Black, color = Color.Black)
+                }
+            },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "Enter your Google Gemini API Key to enable automatic transcription and summary generation.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        color = Color.DarkGray
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = enteredApiKey,
+                        onValueChange = { enteredApiKey = it },
+                        label = { Text("API Key", fontWeight = FontWeight.Bold) },
+                        placeholder = { Text("Paste AIzaSy... key") },
+                        singleLine = true,
+                        visualTransformation = if (apiKeyVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            IconButton(onClick = { apiKeyVisible = !apiKeyVisible }) {
+                                Icon(
+                                    imageVector = if (apiKeyVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = "Toggle key visibility",
+                                    tint = Color.Black
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    TextButton(
+                        onClick = {
+                            val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/app/apikey")).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            try {
+                                context.startActivity(browserIntent)
+                            } catch (_: Exception) {}
+                        }
+                    ) {
+                        Text("Get Free API Key (Google AI Studio) ->", fontWeight = FontWeight.Bold)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { viewModel.saveApiKey(enteredApiKey) },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(2.dp, Color.Black)
+                ) {
+                    Text("Save Key", fontWeight = FontWeight.Bold, color = Color.Black)
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { viewModel.dismissApiKeyDialog() },
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(2.dp, Color.Black)
+                ) {
+                    Text("Cancel", fontWeight = FontWeight.Bold, color = Color.Black)
+                }
+            },
+            shape = RoundedCornerShape(16.dp),
+            containerColor = MaterialTheme.colorScheme.surface,
+            modifier = Modifier.border(3.dp, Color.Black, RoundedCornerShape(16.dp))
+        )
+    }
+
+    // Sync Batch Options Dialog
+    if (selectedFolderForLimit != null) {
+        val totalCount = folderTotalRecordings
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissLimitDialog() },
+            title = {
+                Text("Analyze Recordings", fontWeight = FontWeight.Black, color = Color.Black)
+            },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "Found $totalCount call recording(s) in selected folder. Choose how many recent calls to analyze:",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        color = Color.DarkGray
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Button(
+                        onClick = { viewModel.startSyncWithLimit(context, 20) },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(2.dp, Color.Black)
+                    ) {
+                        Text("Latest 20 Calls (Fastest - ~1 min)", fontWeight = FontWeight.Bold, color = Color.Black)
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = { viewModel.startSyncWithLimit(context, 50) },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(2.dp, Color.Black)
+                    ) {
+                        Text("Latest 50 Calls (Recommended)", fontWeight = FontWeight.Bold, color = Color.Black)
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = { viewModel.startSyncWithLimit(context, 100) },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.White),
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(2.dp, Color.Black)
+                    ) {
+                        Text("Latest 100 Calls", fontWeight = FontWeight.Bold, color = Color.Black)
+                    }
+                    if (totalCount > 100) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedButton(
+                            onClick = { viewModel.startSyncWithLimit(context, totalCount) },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(2.dp, Color.Black)
+                        ) {
+                            Text("All $totalCount Calls (May take long)", fontWeight = FontWeight.Bold, color = Color.Black)
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { viewModel.dismissLimitDialog() },
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(2.dp, Color.Black)
+                ) {
+                    Text("Cancel", fontWeight = FontWeight.Bold, color = Color.Black)
+                }
+            },
+            shape = RoundedCornerShape(16.dp),
+            containerColor = MaterialTheme.colorScheme.surface,
+            modifier = Modifier.border(3.dp, Color.Black, RoundedCornerShape(16.dp))
+        )
     }
 
     if (recordingToDelete != null) {
@@ -300,6 +480,15 @@ fun CallScribeApp(viewModel: CallViewModel) {
                 title = { Text("Call Scribe", fontWeight = FontWeight.Black, color = Color.Black) },
                 actions = {
                     IconButton(
+                        onClick = { viewModel.showApiKeyDialog.value = true }
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Key,
+                            contentDescription = "Gemini API Key Settings",
+                            tint = Color.Black
+                        )
+                    }
+                    IconButton(
                         onClick = { viewModel.checkForUpdates(manual = true) },
                         enabled = !isCheckingUpdate
                     ) {
@@ -452,12 +641,29 @@ fun CallScribeApp(viewModel: CallViewModel) {
                         shape = RoundedCornerShape(16.dp)
                     ) {
                         Column(modifier = Modifier.padding(16.dp)) {
-                            Text(
-                                text = "Syncing & Analyzing Calls...",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Black,
-                                color = Color.Black
-                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Syncing & Analyzing...",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Black,
+                                    color = Color.Black
+                                )
+                                Button(
+                                    onClick = { viewModel.cancelSync() },
+                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
+                                    shape = RoundedCornerShape(8.dp),
+                                    border = BorderStroke(2.dp, Color.Black),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                ) {
+                                    Icon(Icons.Default.Stop, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color.Black)
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Stop", fontWeight = FontWeight.Black, color = Color.Black, style = MaterialTheme.typography.labelMedium)
+                                }
+                            }
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(
                                 text = syncStatus,
@@ -465,11 +671,21 @@ fun CallScribeApp(viewModel: CallViewModel) {
                                 fontWeight = FontWeight.Bold,
                                 color = Color.Black
                             )
-                            Spacer(modifier = Modifier.height(16.dp))
+                            if (syncTotalCount > 0) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "Analyzed: $syncProcessedCount / $syncTotalCount" + if (syncErrorCount > 0) " (${syncErrorCount} failed)" else "",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.DarkGray
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(12.dp))
                             LinearProgressIndicator(
+                                progress = { if (syncTotalCount > 0) syncProgress else 0f },
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(8.dp)
+                                    .height(10.dp)
                                     .border(2.dp, Color.Black),
                                 color = MaterialTheme.colorScheme.secondary,
                                 trackColor = Color.White

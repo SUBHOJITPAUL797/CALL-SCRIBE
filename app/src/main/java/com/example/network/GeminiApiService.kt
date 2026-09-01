@@ -133,9 +133,15 @@ object GeminiResponseParser {
     }
 }
 
-class GeminiRepository {
+class ApiKeyMissingException(message: String = "Gemini API key is not configured. Please enter your API key in Settings.") : Exception(message)
+class ApiKeyInvalidException(message: String = "Invalid Gemini API key. Please check your key in Settings.") : Exception(message)
+class ApiQuotaExceededException(message: String = "Gemini API quota exceeded or rate limit reached. Please wait a moment.") : Exception(message)
+
+class GeminiRepository(
+    private val apiKeyProvider: () -> String = { BuildConfig.GEMINI_API_KEY }
+) {
     fun isApiKeyConfigured(): Boolean {
-        val key = BuildConfig.GEMINI_API_KEY
+        val key = apiKeyProvider().trim()
         return key.isNotBlank() &&
                !key.equals("MY_GEMINI_API_KEY", ignoreCase = true) &&
                !key.equals("YOUR_API_KEY", ignoreCase = true) &&
@@ -143,9 +149,9 @@ class GeminiRepository {
     }
 
     suspend fun summarizeTranscription(transcription: String): String = withContext(Dispatchers.IO) {
-        val apiKey = BuildConfig.GEMINI_API_KEY
+        val apiKey = apiKeyProvider().trim()
         if (!isApiKeyConfigured()) {
-            return@withContext "Error: Gemini API key is not configured. Please set GEMINI_API_KEY in .env"
+            return@withContext "Error: Gemini API key is not configured. Please enter your API key in Settings."
         }
         val request = GenerateContentRequest(
             systemInstruction = Content(
@@ -168,10 +174,10 @@ class GeminiRepository {
         base64Audio: String,
         mimeType: String
     ): Result<Pair<String, String>> = withContext(Dispatchers.IO) {
-        val apiKey = BuildConfig.GEMINI_API_KEY
+        val apiKey = apiKeyProvider().trim()
         if (!isApiKeyConfigured()) {
             return@withContext Result.failure(
-                IllegalStateException("Gemini API key is not configured in .env file.")
+                ApiKeyMissingException()
             )
         }
 
@@ -210,9 +216,17 @@ class GeminiRepository {
             val parsed = GeminiResponseParser.parseAudioAnalysis(fullText)
             Result.success(parsed)
         } catch (e: retrofit2.HttpException) {
+            val code = e.code()
             val errorBody = try { e.response()?.errorBody()?.string() } catch (_: Exception) { null }
-            val message = if (!errorBody.isNullOrBlank()) "API Error (${e.code()}): $errorBody" else "HTTP error: ${e.code()} ${e.message()}"
-            Result.failure(Exception(message, e))
+            val exception = when (code) {
+                400, 401, 403 -> ApiKeyInvalidException("Gemini API Key is invalid (HTTP $code). Please check your key in Settings.")
+                429 -> ApiQuotaExceededException("Gemini rate limit or quota exceeded (HTTP 429). Please wait a moment.")
+                else -> {
+                    val message = if (!errorBody.isNullOrBlank()) "API Error ($code): $errorBody" else "HTTP error: $code ${e.message()}"
+                    Exception(message, e)
+                }
+            }
+            Result.failure(exception)
         } catch (e: Throwable) {
             Result.failure(Exception(e.localizedMessage ?: "Unknown error occurred during analysis", e))
         }
