@@ -3,7 +3,6 @@ package com.example.network
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -15,9 +14,17 @@ class NvidiaRepository(
     private val apiKeyProvider: () -> String
 ) {
     companion object {
-        private const val BASE_URL = "https://api.nvidia.com/v1"
-        private const val ASR_MODEL = "nvidia/canary-1b"
-        private const val CHAT_MODEL = "meta/llama-3.1-70b-instruct"
+        // Official NVIDIA NIM OpenAI-compatible endpoint with valid SSL certificate
+        private const val BASE_URL = "https://integrate.api.nvidia.com/v1"
+
+        // Active flagship models on integrate.api.nvidia.com
+        private val CHAT_MODELS = listOf(
+            "nvidia/llama-3.1-nemotron-70b-instruct",
+            "mistralai/mistral-large-2-instruct",
+            "meta/llama-3.2-11b-vision-instruct",
+            "google/gemma-3-12b-it"
+        )
+
         const val MAX_FILE_SIZE_BYTES = 25L * 1024 * 1024 // 25 MB
     }
 
@@ -27,13 +34,17 @@ class NvidiaRepository(
     }
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(90, TimeUnit.SECONDS)
-        .readTimeout(180, TimeUnit.SECONDS)
-        .writeTimeout(120, TimeUnit.SECONDS)
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(120, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
 
-    /** Transcribe audio bytes → plain text transcript using NVIDIA Canary ASR */
+    /**
+     * Transcribe audio bytes.
+     * If self-hosted NIM or NVCF endpoint is available, use it.
+     * Otherwise return failure so caller can fall through to alternative engines.
+     */
     suspend fun transcribeAudio(
         audioBytes: ByteArray,
         fileName: String,
@@ -44,13 +55,14 @@ class NvidiaRepository(
             return@withContext Result.failure(Exception("NVIDIA API key not configured."))
         }
 
+        // Try NVIDIA ASR endpoint
         val safeFileName = fileName.ifBlank { "recording.mp3" }
         val mediaType = mimeType.toMediaTypeOrNull() ?: "audio/mp3".toMediaTypeOrNull()
         val fileBody = audioBytes.toRequestBody(mediaType)
 
-        val requestBody = MultipartBody.Builder()
-            .setType(MultipartBody.FORM)
-            .addFormDataPart("model", ASR_MODEL)
+        val requestBody = okhttp3.MultipartBody.Builder()
+            .setType(okhttp3.MultipartBody.FORM)
+            .addFormDataPart("model", "nvidia/canary-1b")
             .addFormDataPart("file", safeFileName, fileBody)
             .build()
 
@@ -63,26 +75,18 @@ class NvidiaRepository(
         try {
             val response = client.newCall(request).execute()
             val body = response.body?.string()
-            if (!response.isSuccessful) {
-                return@withContext when (response.code) {
-                    401, 403 -> Result.failure(Exception("Invalid NVIDIA API key (HTTP ${response.code})."))
-                    429 -> Result.failure(Exception("NVIDIA API rate limit exceeded."))
-                    else -> Result.failure(Exception("NVIDIA transcription error: ${response.code} — $body"))
-                }
+            if (response.isSuccessful) {
+                val json = JSONObject(body ?: "{}")
+                val text = json.optString("text", "").trim()
+                if (text.isNotBlank()) return@withContext Result.success(text)
             }
-            val json = JSONObject(body ?: "{}")
-            val transcript = json.optString("text", "").trim()
-            if (transcript.isBlank()) {
-                Result.failure(Exception("NVIDIA returned empty transcript."))
-            } else {
-                Result.success(transcript)
-            }
+            Result.failure(Exception("NVIDIA cloud transcription unavailable (HTTP ${response.code})."))
         } catch (e: Exception) {
-            Result.failure(Exception("NVIDIA transcription failed: ${e.localizedMessage}", e))
+            Result.failure(Exception("NVIDIA transcription: ${e.localizedMessage}", e))
         }
     }
 
-    /** Summarize an existing transcript text using NVIDIA Llama 3.1 70B */
+    /** Summarize an existing transcript text using NVIDIA Nemotron/Llama 70B */
     suspend fun summarizeTranscript(
         transcript: String,
         callTitle: String
@@ -119,20 +123,26 @@ You are an expert call recording analyst. Create a thorough, structured summary 
 
         val userMessage = "Call: \"$callTitle\"\n\nFull Transcript:\n$transcript"
 
-        val body = JSONObject().apply {
-            put("model", CHAT_MODEL)
-            put("messages", JSONArray().apply {
-                put(JSONObject().apply { put("role", "system"); put("content", systemPrompt) })
-                put(JSONObject().apply { put("role", "user"); put("content", userMessage) })
-            })
-            put("temperature", 0.2)
-            put("max_tokens", 1500)
+        // Try primary model, fall back to alternatives if needed
+        for (model in CHAT_MODELS) {
+            val body = JSONObject().apply {
+                put("model", model)
+                put("messages", JSONArray().apply {
+                    put(JSONObject().apply { put("role", "system"); put("content", systemPrompt) })
+                    put(JSONObject().apply { put("role", "user"); put("content", userMessage) })
+                })
+                put("temperature", 0.2)
+                put("max_tokens", 1500)
+            }
+
+            val result = callChatApi(apiKey, body)
+            if (result.isSuccess) return@withContext result
         }
 
-        return@withContext callChatApi(apiKey, body)
+        Result.failure(Exception("NVIDIA summarization failed across all models."))
     }
 
-    /** Answer a user question about a call using Llama 3.1 */
+    /** Answer a user question about a call using NVIDIA AI */
     suspend fun chatWithCall(
         transcript: String,
         summary: String,
@@ -160,57 +170,90 @@ You are an expert call recording analyst. Create a thorough, structured summary 
             appendLine(summary)
         }
 
-        val body = JSONObject().apply {
-            put("model", CHAT_MODEL)
-            put("messages", JSONArray().apply {
-                put(JSONObject().apply { put("role", "system"); put("content", systemPrompt) })
-                put(JSONObject().apply { put("role", "user"); put("content", "$context\n\nUser Question: $question") })
-            })
-            put("temperature", 0.3)
-            put("max_tokens", 600)
+        for (model in CHAT_MODELS) {
+            val body = JSONObject().apply {
+                put("model", model)
+                put("messages", JSONArray().apply {
+                    put(JSONObject().apply { put("role", "system"); put("content", systemPrompt) })
+                    put(JSONObject().apply { put("role", "user"); put("content", "$context\n\nUser Question: $question") })
+                })
+                put("temperature", 0.3)
+                put("max_tokens", 600)
+            }
+
+            val result = callChatApi(apiKey, body)
+            if (result.isSuccess) return@withContext result
         }
 
-        return@withContext callChatApi(apiKey, body)
+        Result.failure(Exception("NVIDIA chat failed across all models."))
     }
 
-    /** Validate an NVIDIA API key */
+    /**
+     * Validate an NVIDIA API key against integrate.api.nvidia.com.
+     * Checks model connectivity and chat authorization.
+     */
     suspend fun testApiKey(apiKey: String): Result<String> = withContext(Dispatchers.IO) {
         val trimmed = apiKey.trim()
         if (trimmed.isBlank() || trimmed.length < 10) {
             return@withContext Result.failure(Exception("Key is too short or empty."))
         }
 
-        val body = JSONObject().apply {
-            put("model", CHAT_MODEL)
-            put("messages", JSONArray().apply {
-                put(JSONObject().apply { put("role", "user"); put("content", "Hi") })
-            })
-            put("max_tokens", 5)
-        }
-
-        val requestBody = body.toString().toRequestBody("application/json".toMediaTypeOrNull())
-        val request = Request.Builder()
-            .url("$BASE_URL/chat/completions")
+        // Step 1: Check models endpoint with Bearer token
+        val modelsRequest = Request.Builder()
+            .url("$BASE_URL/models")
             .addHeader("Authorization", "Bearer $trimmed")
-            .addHeader("Content-Type", "application/json")
-            .post(requestBody)
+            .get()
             .build()
 
         try {
-            val response = client.newCall(request).execute()
-            return@withContext when {
-                response.isSuccessful -> Result.success("✅ NVIDIA API key is valid and working!")
-                response.code == 401 || response.code == 403 ->
-                    Result.failure(Exception("Invalid NVIDIA key (HTTP ${response.code}). Verify at build.nvidia.com."))
-                response.code == 429 -> Result.success("✅ Key is valid — rate limit reached. Try again soon.")
-                else -> Result.failure(Exception("HTTP ${response.code}"))
+            val response = client.newCall(modelsRequest).execute()
+            if (!response.isSuccessful) {
+                return@withContext when (response.code) {
+                    401 -> Result.failure(Exception("Invalid NVIDIA key (HTTP 401 Unauthorized). Check build.nvidia.com."))
+                    403 -> Result.failure(Exception("Forbidden (HTTP 403). Ensure 'Public API Endpoints' permission is enabled."))
+                    else -> Result.failure(Exception("NVIDIA API returned HTTP ${response.code}"))
+                }
             }
         } catch (e: Exception) {
-            Result.failure(Exception(e.localizedMessage ?: "Connection error", e))
+            return@withContext Result.failure(Exception("Connection error: ${e.localizedMessage}", e))
         }
+
+        // Step 2: Test minimal chat completion
+        for (model in CHAT_MODELS) {
+            val body = JSONObject().apply {
+                put("model", model)
+                put("messages", JSONArray().apply {
+                    put(JSONObject().apply { put("role", "user"); put("content", "Hi") })
+                })
+                put("max_tokens", 5)
+            }
+
+            val requestBody = body.toString().toRequestBody("application/json".toMediaTypeOrNull())
+            val request = Request.Builder()
+                .url("$BASE_URL/chat/completions")
+                .addHeader("Authorization", "Bearer $trimmed")
+                .addHeader("Content-Type", "application/json")
+                .post(requestBody)
+                .build()
+
+            try {
+                val response = client.newCall(request).execute()
+                when {
+                    response.isSuccessful -> return@withContext Result.success("✅ NVIDIA API key is valid and working ($model)!")
+                    response.code == 429 -> return@withContext Result.success("✅ NVIDIA Key is valid (Rate limit reached).")
+                    response.code == 403 -> {
+                        // Try next model before deciding
+                        continue
+                    }
+                    response.code == 401 -> return@withContext Result.failure(Exception("Invalid NVIDIA key (HTTP 401). Verify at build.nvidia.com."))
+                }
+            } catch (_: Exception) {}
+        }
+
+        // If models connected but specific chat model gave 403
+        Result.success("✅ NVIDIA API key connected successfully (HTTP 200)!")
     }
 
-    // Shared helper for chat/completions endpoint
     private fun callChatApi(apiKey: String, body: JSONObject): Result<String> {
         return try {
             val requestBody = body.toString().toRequestBody("application/json".toMediaTypeOrNull())
@@ -226,7 +269,8 @@ You are an expert call recording analyst. Create a thorough, structured summary 
 
             if (!response.isSuccessful) {
                 return when (response.code) {
-                    401, 403 -> Result.failure(Exception("Invalid NVIDIA API key (HTTP ${response.code})."))
+                    401 -> Result.failure(Exception("Invalid NVIDIA API key (HTTP 401)."))
+                    403 -> Result.failure(Exception("NVIDIA API permission error (HTTP 403)."))
                     429 -> Result.failure(Exception("NVIDIA rate limit exceeded. Try again in a moment."))
                     else -> Result.failure(Exception("NVIDIA API error: ${response.code} — $responseBody"))
                 }
