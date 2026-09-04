@@ -20,24 +20,51 @@ object LocalAnalysisEngine {
     )
 
     private val monetaryPattern = Regex("""(?i)(?:[$€£₹]|rs\.?|usd|inr|dollars?|bucks?)\s*\d+(?:,\d+)*(?:\.\d+)?|\d+(?:,\d+)*(?:\.\d+)?\s*(?:[$€£₹]|rs\.?|usd|inr|dollars?|bucks?)""")
-    private val phonePattern = Regex("""\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b""")
+    private val phonePattern = Regex("""\b(?:\+?\d{1,3}[.\s]?)?\(?\d{3}\)?[.\s]?\d{3}[.\s]?\d{4}\b""")
 
     /**
-     * Produces a structured local on-device summary and action item list without requiring an API key.
+     * Returns a structured summary + transcript.
+     * When transcript is empty (no Gemini key), returns an honest "needs API key" message
+     * instead of fake placeholder content.
      */
     fun analyzeLocally(transcript: String, fileName: String): Pair<String, String> {
         val cleanTranscript = transcript.trim()
-        if (cleanTranscript.isBlank() || cleanTranscript.equals("No speech detected.", ignoreCase = true)) {
-            val smartTitle = CallMetadataParser.cleanCallTitle(fileName)
-            val fallbackTranscript = "Audio recording for $smartTitle. (On-Device Speech Analysis)"
-            val fallbackSummary = buildString {
-                appendLine("• Recording: $smartTitle")
-                appendLine("• Mode: On-Device Analysis (Zero API Key)")
-                appendLine("• Ready to play, review, or chat with this call.")
+
+        // No transcript available (no Gemini API key was configured)
+        if (cleanTranscript.isBlank() ||
+            cleanTranscript.equals("No speech detected.", ignoreCase = true) ||
+            cleanTranscript.contains("On-Device Speech Analysis")) {
+
+            val smartTitle = try { CallMetadataParser.cleanCallTitle(fileName) } catch (_: Exception) { fileName }
+
+            val noKeyTranscript = buildString {
+                appendLine("⚠️  Transcription requires a Gemini API Key.")
+                appendLine("")
+                appendLine("This call recording has NOT been transcribed yet.")
+                appendLine("To unlock full AI analysis:")
+                appendLine("  1. Tap the 🔑 key icon in the top bar")
+                appendLine("  2. Enter your free Google Gemini API key")
+                appendLine("     (get one free at aistudio.google.com)")
+                appendLine("  3. Re-sync this folder to analyze all calls")
             }.trim()
-            return Pair(fallbackTranscript, fallbackSummary)
+
+            val noKeySummary = buildString {
+                appendLine("⚠️  AI Analysis Not Available")
+                appendLine("")
+                appendLine("Call: $smartTitle")
+                appendLine("")
+                appendLine("To get a full summary of this call (who said what,")
+                appendLine("action items, decisions, key details), you need a")
+                appendLine("free Gemini API key.")
+                appendLine("")
+                appendLine("➡  Tap 🔑 in the top bar → Add your free API key")
+                appendLine("   → Re-sync folder → Full AI analysis unlocked!")
+            }.trim()
+
+            return Pair(noKeyTranscript, noKeySummary)
         }
 
+        // Real transcript available — do extractive analysis
         val sentences = cleanTranscript
             .split(Regex("""(?<=[.!?])\s+|\n+"""))
             .map { it.trim() }
@@ -61,28 +88,28 @@ object LocalAnalysisEngine {
         }
 
         val summary = buildString {
-            appendLine("ON-DEVICE SUMMARY")
-            appendLine("• Total Speech Segments: ${sentences.size}")
+            appendLine("📋 CALL ANALYSIS (On-Device)")
+            appendLine("• Speech segments analyzed: ${sentences.size}")
 
             if (actionItems.isNotEmpty()) {
-                appendLine("\nACTION ITEMS & COMMITMENTS:")
-                actionItems.take(5).forEach { item ->
-                    appendLine("• $item")
-                }
+                appendLine("\n✅ ACTION ITEMS & COMMITMENTS:")
+                actionItems.take(6).forEach { appendLine("• $it") }
             } else {
-                appendLine("\nKEY POINTS:")
-                sentences.take(3).forEach { appendLine("• $it") }
+                appendLine("\n📝 KEY POINTS:")
+                sentences.take(4).forEach { appendLine("• $it") }
             }
 
             if (datesFound.isNotEmpty()) {
-                appendLine("\nTIMELINES & DATES:")
+                appendLine("\n📅 DATES & TIMELINES:")
                 datesFound.take(3).forEach { appendLine("• $it") }
             }
 
             if (financialFound.isNotEmpty()) {
-                appendLine("\nDETAILS / NUMBERS:")
+                appendLine("\n🔢 KEY DETAILS / NUMBERS:")
                 financialFound.take(3).forEach { appendLine("• $it") }
             }
+
+            appendLine("\n💡 TIP: Add a Gemini API key for richer structured summaries.")
         }.trim()
 
         return Pair(cleanTranscript, summary)
@@ -99,70 +126,88 @@ object LocalAnalysisEngine {
         val q = question.trim().lowercase(Locale.ROOT)
         if (q.isBlank()) return "Please ask a question about the call."
 
+        // No real transcript — guide user to add API key
+        val isEmptyTranscript = transcript.isBlank() ||
+            transcript.contains("Transcription requires") ||
+            transcript.contains("API Key") ||
+            transcript.contains("On-Device Speech Analysis")
+
+        if (isEmptyTranscript) {
+            return buildString {
+                appendLine("⚠️  I don't have a transcript to search through for this call.")
+                appendLine("")
+                appendLine("This call hasn't been transcribed yet because no Gemini API key is set.")
+                appendLine("")
+                appendLine("To chat about this call:")
+                appendLine("  1. Tap 🔑 in the top bar")
+                appendLine("  2. Add your free Gemini API key (aistudio.google.com)")
+                appendLine("  3. Re-sync this folder")
+                appendLine("")
+                appendLine("After that, I'll have the full transcript and can answer anything about this call.")
+            }.trim()
+        }
+
         val sentences = transcript
             .split(Regex("""(?<=[.!?])\s+|\n+"""))
             .map { it.trim() }
             .filter { it.length > 5 }
 
-        // Intent 1: Action items
+        // Intent: Action items
         if (q.contains("action") || q.contains("task") || q.contains("todo") || q.contains("to do") || q.contains("next step")) {
             val actions = sentences.filter { s ->
                 val l = s.lowercase(Locale.ROOT)
                 actionKeywords.any { l.contains(it) }
             }
             return if (actions.isNotEmpty()) {
-                "Here are the action items identified in this call:\n" +
-                        actions.take(4).joinToString("\n") { "• $it" }
+                "✅ Action items from this call:\n" + actions.take(5).joinToString("\n") { "• $it" }
             } else {
-                "No explicit action items or promises were detected in this conversation."
+                "No explicit action items were detected in this conversation."
             }
         }
 
-        // Intent 2: Date, Time, Deadlines, Meeting
+        // Intent: Date, Time, Deadlines
         if (q.contains("when") || q.contains("date") || q.contains("time") || q.contains("deadline") || q.contains("schedule") || q.contains("meet")) {
             val dateMatches = sentences.filter { s ->
                 val l = s.lowercase(Locale.ROOT)
                 dateKeywords.any { l.contains(it) }
             }
             return if (dateMatches.isNotEmpty()) {
-                "Mentioned dates and schedules:\n" +
-                        dateMatches.take(4).joinToString("\n") { "• $it" }
+                "📅 Dates and schedules mentioned:\n" + dateMatches.take(4).joinToString("\n") { "• $it" }
             } else {
                 "No specific dates or times were detected in the call transcript."
             }
         }
 
-        // Intent 3: Money, Price, Cost, Numbers
-        if (q.contains("price") || q.contains("cost") || q.contains("money") || q.contains("amount") || q.contains("rate") || q.contains("pay") || q.contains("phone") || q.contains("number")) {
+        // Intent: Money, Numbers
+        if (q.contains("price") || q.contains("cost") || q.contains("money") || q.contains("amount") || q.contains("rate") || q.contains("pay") || q.contains("number")) {
             val numberMatches = sentences.filter { s ->
                 monetaryPattern.containsMatchIn(s) || phonePattern.containsMatchIn(s) || s.any { it.isDigit() }
             }
             return if (numberMatches.isNotEmpty()) {
-                "Numbers and amounts discussed:\n" +
-                        numberMatches.take(4).joinToString("\n") { "• $it" }
+                "🔢 Numbers and amounts mentioned:\n" + numberMatches.take(4).joinToString("\n") { "• $it" }
             } else {
                 "No financial figures or phone numbers were detected in this call."
             }
         }
 
-        // Intent 4: Summary / Overview
-        if (q.contains("summar") || q.contains("about") || q.contains("brief") || q.contains("overview") || q.contains("tldr")) {
-            return if (summary.isNotBlank()) {
+        // Intent: Summary / Overview
+        if (q.contains("summar") || q.contains("about") || q.contains("brief") || q.contains("overview") || q.contains("tldr") || q.contains("what happened")) {
+            return if (summary.isNotBlank() && !summary.contains("⚠️")) {
                 summary
             } else {
-                "Key excerpt:\n" + sentences.take(3).joinToString("\n") { "• $it" }
+                "📋 Key excerpt:\n" + sentences.take(4).joinToString("\n") { "• $it" }
             }
         }
 
-        // General search: Token match relevance
+        // General keyword search
         val stopWords = setOf("what", "where", "who", "whom", "how", "why", "the", "a", "an", "is", "was", "are", "were", "did", "do", "does", "in", "on", "at", "about", "for", "with", "this", "that")
         val tokens = q.split(Regex("""\W+""")).filter { it.length > 2 && !stopWords.contains(it) }
 
         if (tokens.isEmpty()) {
             return if (sentences.isNotEmpty()) {
-                "Here is what was said in the call:\n\"${sentences.first()}\""
+                "Here is what was said:\n\"${sentences.take(2).joinToString(" ")}\""
             } else {
-                "Transcript is empty."
+                "Transcript is empty. Please re-sync after adding a Gemini API key."
             }
         }
 
@@ -176,7 +221,7 @@ object LocalAnalysisEngine {
         return if (ranked.isNotEmpty()) {
             "Based on the call:\n" + ranked.take(3).joinToString("\n\n") { "• \"${it.first}\"" }
         } else {
-            "I couldn't find a direct reference to \"$question\" in this call transcript."
+            "I couldn't find a direct reference to \"$question\" in this call transcript.\n\nTry asking about: action items, dates, amounts, agreements, or what was discussed."
         }
     }
 }

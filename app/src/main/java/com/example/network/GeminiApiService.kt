@@ -87,7 +87,7 @@ object GeminiResponseParser {
         """(?i)(?:\*{1,2}|#{1,4}\s*)?(?:TRANSCRIPTION|TRANSCRIPT)(?:\*{1,2})?:?(?:\*{1,2})?\s*"""
     )
     private val summaryPattern = Regex(
-        """(?i)(?:\*{1,2}|#{1,4}\s*)?(?:SUMMARY|ACTION ITEMS|KEY TAKEAWAYS|SUMMARY & ACTION ITEMS)(?:\*{1,2})?:?(?:\*{1,2})?\s*"""
+        """(?i)(?:\*{1,2}|#{1,4}\s*)?(?:SUMMARY|ACTION ITEMS|KEY TAKEAWAYS|SUMMARY & ACTION ITEMS|STRUCTURED SUMMARY)(?:\*{1,2})?:?(?:\*{1,2})?\s*"""
     )
 
     fun parseAudioAnalysis(fullText: String): Pair<String, String> {
@@ -123,7 +123,6 @@ object GeminiResponseParser {
             )
         }
 
-        // Fallback: Check if response has clear paragraphs
         val paragraphs = trimmed.split("\n\n").filter { it.isNotBlank() }
         return if (paragraphs.size > 1) {
             Pair(paragraphs.dropLast(1).joinToString("\n\n").trim(), paragraphs.last().trim())
@@ -155,12 +154,25 @@ class GeminiRepository(
         }
         val request = GenerateContentRequest(
             systemInstruction = Content(
-                parts = listOf(Part(text = "You are a helpful assistant that summarizes call transcripts into key action items. Return a clear, concise bulleted list of action items, or a short paragraph summary if no clear action items exist. Do not exceed 200 words. Format clearly."))
+                parts = listOf(Part(text = "You are an expert assistant who creates detailed, structured summaries from call transcripts. Be thorough — extract everything important so the user never has to listen to the recording again."))
             ),
             contents = listOf(Content(
-                parts = listOf(Part(text = transcription))
+                parts = listOf(Part(text = buildString {
+                    appendLine("Analyze the following call transcript and give a comprehensive structured summary.")
+                    appendLine("Format your response with these sections (use bullet points under each):")
+                    appendLine("")
+                    appendLine("## 📋 What Was Discussed")
+                    appendLine("## 👥 Who Wanted What")
+                    appendLine("## ✅ Action Items & Commitments")
+                    appendLine("## 📅 Dates, Times & Deadlines")
+                    appendLine("## 🔢 Key Details (numbers, names, places, amounts)")
+                    appendLine("## 🤝 What Was Agreed Upon")
+                    appendLine("")
+                    appendLine("TRANSCRIPT:")
+                    appendLine(transcription)
+                }))
             )),
-            generationConfig = GenerationConfig(temperature = 0.3f)
+            generationConfig = GenerationConfig(temperature = 0.2f)
         )
         try {
             val response = RetrofitClient.service.generateContent(apiKey, request)
@@ -176,9 +188,7 @@ class GeminiRepository(
     ): Result<Pair<String, String>> = withContext(Dispatchers.IO) {
         val apiKey = apiKeyProvider().trim()
         if (!isApiKeyConfigured()) {
-            return@withContext Result.failure(
-                ApiKeyMissingException()
-            )
+            return@withContext Result.failure(ApiKeyMissingException())
         }
 
         val normalizedMime = when {
@@ -192,17 +202,49 @@ class GeminiRepository(
             else -> "audio/mp3"
         }
 
+        // Rich system prompt for complete, useful call analysis
+        val systemPrompt = """
+You are an expert call recording analyst. Your job is to make sure the user knows EVERYTHING that was said in this call without having to listen to it. Be thorough, structured, and detailed.
+
+Listen to this phone call audio carefully. Then output in EXACTLY this format:
+
+TRANSCRIPTION:
+[Write the FULL verbatim transcription of everything spoken. If you can identify speakers, label them as "Speaker 1:", "Speaker 2:" etc. Include every word spoken.]
+
+SUMMARY:
+## 📋 What Was Discussed
+[2-5 bullet points of the main topics covered in this call]
+
+## 👥 Who Said / Wanted What
+[What each person asked for, needed, requested, or communicated]
+
+## ✅ Action Items & Commitments
+[Every specific task, promise, or commitment made — what, by whom, by when]
+
+## 📅 Dates, Times & Deadlines
+[Every date, time, appointment, deadline, or schedule mentioned]
+
+## 🔢 Key Details
+[All important numbers, names, places, reference numbers, amounts, phone numbers, addresses]
+
+## 🤝 What Was Agreed / Decided
+[Final agreements, decisions, outcomes, or next steps]
+
+## 💡 Quick Summary (1-2 sentences)
+[Ultra-brief TL;DR of the entire call]
+
+Do NOT skip any section. Do NOT summarize too briefly. The user needs to know everything.
+        """.trimIndent()
+
         val request = GenerateContentRequest(
-            systemInstruction = Content(
-                parts = listOf(Part(text = "You are an assistant. The user provides an audio file. You must first output 'TRANSCRIPTION:' followed by a full text transcription of the audio. Then output 'SUMMARY:' followed by a 150-word action-item summary of the transcript. Do NOT stray from this format."))
-            ),
+            systemInstruction = Content(parts = listOf(Part(text = systemPrompt))),
             contents = listOf(Content(
                 parts = listOf(
-                    Part(text = "Please transcribe and summarize this meeting recording."),
+                    Part(text = "Transcribe and analyze this call recording completely."),
                     Part(inlineData = InlineData(mimeType = normalizedMime, data = base64Audio))
                 )
             )),
-            generationConfig = GenerationConfig(temperature = 0.2f)
+            generationConfig = GenerationConfig(temperature = 0.1f)
         )
         try {
             val response = RetrofitClient.service.generateContent(apiKey, request)
@@ -245,16 +287,16 @@ class GeminiRepository(
         try {
             val response = RetrofitClient.service.generateContent(trimmed, request)
             if (response.candidates?.isNotEmpty() == true) {
-                Result.success("API Key is valid and working!")
+                Result.success("✅ API Key is valid and working!")
             } else {
-                Result.success("Connected to Gemini successfully.")
+                Result.success("✅ Connected to Gemini successfully.")
             }
         } catch (e: retrofit2.HttpException) {
             val code = e.code()
             if (code == 400 || code == 401 || code == 403) {
                 Result.failure(ApiKeyInvalidException("Invalid API key (HTTP $code). Please verify in Google AI Studio."))
             } else if (code == 429) {
-                Result.success("Key is valid, but current quota/rate limit is reached.")
+                Result.success("✅ Key is valid, but current quota/rate limit is reached.")
             } else {
                 Result.failure(Exception("HTTP $code: ${e.message()}"))
             }
@@ -273,21 +315,32 @@ class GeminiRepository(
             return@withContext Result.failure(ApiKeyMissingException())
         }
 
+        val hasRealTranscript = transcript.isNotBlank() &&
+            !transcript.contains("Tap 🔑") &&
+            !transcript.contains("API Key required") &&
+            !transcript.contains("On-Device Speech Analysis")
+
         val prompt = buildString {
-            appendLine("You are an intelligent assistant analyzing a specific call recording.")
-            appendLine("Answer the user's question clearly, politely, and concisely based strictly on the transcription and summary below.")
-            appendLine("If the information was not mentioned in the call, explicitly state that it was not discussed.")
-            appendLine("\n--- CALL TRANSCRIPTION ---")
-            appendLine(transcript)
-            appendLine("\n--- CALL SUMMARY ---")
+            appendLine("You are an intelligent assistant analyzing a specific recorded phone call.")
+            appendLine("Answer the user's question thoroughly based on the call content below.")
+            appendLine("If the information wasn't mentioned in the call, clearly say so.")
+            appendLine("Be specific — quote exact words/numbers when relevant.")
+            appendLine("")
+            if (hasRealTranscript) {
+                appendLine("--- FULL CALL TRANSCRIPTION ---")
+                appendLine(transcript)
+                appendLine("")
+            }
+            appendLine("--- CALL SUMMARY ---")
             appendLine(summary)
-            appendLine("\n--- USER QUESTION ---")
+            appendLine("")
+            appendLine("--- USER QUESTION ---")
             appendLine(question)
         }
 
         val request = GenerateContentRequest(
             contents = listOf(Content(parts = listOf(Part(text = prompt)))),
-            generationConfig = GenerationConfig(temperature = 0.3f)
+            generationConfig = GenerationConfig(temperature = 0.2f)
         )
 
         try {
