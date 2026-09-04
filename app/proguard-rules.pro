@@ -12,10 +12,35 @@
 #   public *;
 #}
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# ProGuard rules for CallScribe
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Preserve annotation attributes
+-keepattributes *Annotation*, Signature, InnerClasses, EnclosingMethod
+
+# Moshi & JSON models
+-keepclassmembers class * {
+    @com.squareup.moshi.Json *;
+}
+-keep class com.squareup.moshi.** { *; }
+-keep interface com.squareup.moshi.** { *; }
+
+# Retrofit & OkHttp
+-dontwarn okhttp3.**
+-dontwarn retrofit2.**
+-dontwarn okio.**
+-keepattributes Signature
+-keepattributes Exceptions
+-keepclasseswithmembers class * {
+    @retrofit2.http.* <methods>;
+}
+
+# Room Database
+-keepclassmembers class * extends androidx.room.RoomDatabase {
+    public abstract <methods>;
+}
+-keep class * extends androidx.room.RoomDatabase
+-dontwarn androidx.room.paging.**
+
+# Keep Application models and entities
+-keep class com.example.data.** { *; }
+-keep class com.example.network.** { *; }

@@ -231,4 +231,75 @@ class GeminiRepository(
             Result.failure(Exception(e.localizedMessage ?: "Unknown error occurred during analysis", e))
         }
     }
+
+    suspend fun testApiKey(apiKey: String): Result<String> = withContext(Dispatchers.IO) {
+        val trimmed = apiKey.trim()
+        if (trimmed.isBlank() || trimmed.length < 10) {
+            return@withContext Result.failure(Exception("API Key is too short or empty."))
+        }
+
+        val request = GenerateContentRequest(
+            contents = listOf(Content(parts = listOf(Part(text = "Hello")))),
+            generationConfig = GenerationConfig(temperature = 0.1f)
+        )
+        try {
+            val response = RetrofitClient.service.generateContent(trimmed, request)
+            if (response.candidates?.isNotEmpty() == true) {
+                Result.success("API Key is valid and working!")
+            } else {
+                Result.success("Connected to Gemini successfully.")
+            }
+        } catch (e: retrofit2.HttpException) {
+            val code = e.code()
+            if (code == 400 || code == 401 || code == 403) {
+                Result.failure(ApiKeyInvalidException("Invalid API key (HTTP $code). Please verify in Google AI Studio."))
+            } else if (code == 429) {
+                Result.success("Key is valid, but current quota/rate limit is reached.")
+            } else {
+                Result.failure(Exception("HTTP $code: ${e.message()}"))
+            }
+        } catch (e: Throwable) {
+            Result.failure(Exception(e.localizedMessage ?: "Connection error", e))
+        }
+    }
+
+    suspend fun chatWithCall(
+        transcript: String,
+        summary: String,
+        question: String
+    ): Result<String> = withContext(Dispatchers.IO) {
+        val apiKey = apiKeyProvider().trim()
+        if (!isApiKeyConfigured()) {
+            return@withContext Result.failure(ApiKeyMissingException())
+        }
+
+        val prompt = buildString {
+            appendLine("You are an intelligent assistant analyzing a specific call recording.")
+            appendLine("Answer the user's question clearly, politely, and concisely based strictly on the transcription and summary below.")
+            appendLine("If the information was not mentioned in the call, explicitly state that it was not discussed.")
+            appendLine("\n--- CALL TRANSCRIPTION ---")
+            appendLine(transcript)
+            appendLine("\n--- CALL SUMMARY ---")
+            appendLine(summary)
+            appendLine("\n--- USER QUESTION ---")
+            appendLine(question)
+        }
+
+        val request = GenerateContentRequest(
+            contents = listOf(Content(parts = listOf(Part(text = prompt)))),
+            generationConfig = GenerationConfig(temperature = 0.3f)
+        )
+
+        try {
+            val response = RetrofitClient.service.generateContent(apiKey, request)
+            val answer = response.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
+            if (!answer.isNullOrBlank()) {
+                Result.success(answer.trim())
+            } else {
+                Result.failure(Exception("No answer received from Gemini."))
+            }
+        } catch (e: Throwable) {
+            Result.failure(e)
+        }
+    }
 }

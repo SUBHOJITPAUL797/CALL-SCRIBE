@@ -86,6 +86,18 @@ object AppUpdateManager {
         }
 
         try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                if (!context.packageManager.canRequestPackageInstalls()) {
+                    Toast.makeText(context, "Please allow Call Scribe to install unknown apps, then retry.", Toast.LENGTH_LONG).show()
+                    val manageIntent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                        data = Uri.parse("package:${context.packageName}")
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    context.startActivity(manageIntent)
+                    return
+                }
+            }
+
             val authority = "${context.packageName}.fileprovider"
             val apkUri: Uri = FileProvider.getUriForFile(context, authority, apkFile)
 

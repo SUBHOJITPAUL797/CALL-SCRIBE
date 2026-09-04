@@ -34,10 +34,18 @@ class GreetingScreenshotTest {
         MyApplicationTheme {
             RecordingCard(
                 recording = sampleRecording,
-                onPlayAudio = {},
+                isCurrentlyPlaying = false,
+                isAudioLoaded = false,
+                currentPositionMs = 0,
+                durationMs = 0,
+                onTogglePlay = {},
+                onSeek = {},
+                onChat = {},
                 onDelete = {},
                 onAddToCalendar = {},
-                onShare = {}
+                onShare = {},
+                onCopySummary = {},
+                onCopyTranscript = {}
             )
         }
     }

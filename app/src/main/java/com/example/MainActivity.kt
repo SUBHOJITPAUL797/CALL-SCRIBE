@@ -48,13 +48,31 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.ui.platform.ClipboardManager
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.unit.sp
+import com.example.data.CallMetadataParser
+import com.example.ui.ChatMessage
+import com.example.ui.MessageSender
 import com.example.update.AppUpdateManager
 
 class MainActivity : ComponentActivity() {
@@ -100,6 +118,7 @@ fun Modifier.brutalShadow(
 @Composable
 fun CallScribeApp(viewModel: CallViewModel) {
     val context = LocalContext.current
+    val clipboard: ClipboardManager = LocalClipboardManager.current
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val recordings by viewModel.recordings.collectAsStateWithLifecycle()
     val isSyncing by viewModel.isSyncing.collectAsStateWithLifecycle()
@@ -119,12 +138,27 @@ fun CallScribeApp(viewModel: CallViewModel) {
     val downloadProgress by viewModel.downloadProgress.collectAsStateWithLifecycle()
     val updateStatusMessage by viewModel.updateStatusMessage.collectAsStateWithLifecycle()
 
+    // Audio Player state
+    val playingRecordingId by viewModel.audioPlayer.playingRecordingId.collectAsStateWithLifecycle()
+    val isPlaying by viewModel.audioPlayer.isPlaying.collectAsStateWithLifecycle()
+    val currentPositionMs by viewModel.audioPlayer.currentPositionMs.collectAsStateWithLifecycle()
+    val durationMs by viewModel.audioPlayer.durationMs.collectAsStateWithLifecycle()
+
+    // Chat with Call state
+    val activeChatRecording by viewModel.activeChatRecording.collectAsStateWithLifecycle()
+    val chatMessages by viewModel.chatMessages.collectAsStateWithLifecycle()
+    val isChatLoading by viewModel.isChatLoading.collectAsStateWithLifecycle()
+
     var enteredApiKey by remember { mutableStateOf("") }
     var apiKeyVisible by remember { mutableStateOf(false) }
+    var apiKeyTestResult by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
+    var isTestingKey by remember { mutableStateOf(false) }
 
     LaunchedEffect(showApiKeyDialog) {
         if (showApiKeyDialog) {
             enteredApiKey = viewModel.getApiKey()
+            apiKeyTestResult = null
+            isTestingKey = false
         }
     }
 
@@ -147,12 +181,191 @@ fun CallScribeApp(viewModel: CallViewModel) {
                     Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
             } catch (_: SecurityException) {
-                // Some custom storage providers do not support persistable permissions
             } catch (_: Exception) {
-                // Ignore fallback
             }
             viewModel.onFolderSelected(context, uri)
         }
+    }
+
+    // Chat with Call Dialog (BottomSheet-style full dialog)
+    if (activeChatRecording != null) {
+        val chatRec = activeChatRecording!!
+        var chatInput by remember { mutableStateOf("") }
+        val quickChips = listOf(
+            "What are the action items?",
+            "What was agreed upon?",
+            "Were any dates or deadlines mentioned?",
+            "Give me a 2-bullet email summary"
+        )
+
+        AlertDialog(
+            onDismissRequest = { viewModel.closeChat() },
+            title = {
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null, tint = Color.Black)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "Chat with Call",
+                            fontWeight = FontWeight.Black,
+                            color = Color.Black,
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                    }
+                    Text(
+                        text = CallMetadataParser.cleanCallTitle(chatRec.title),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.DarkGray,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (!viewModel.isApiKeyConfigured()) {
+                        Spacer(Modifier.height(4.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF22C55E), modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("On-Device AI (No Key Required)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF22C55E), fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    // Chat messages
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(260.dp)
+                            .border(2.dp, Color.Black, RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))
+                    ) {
+                        LazyColumn(
+                            modifier = Modifier.padding(10.dp),
+                            reverseLayout = false
+                        ) {
+                            items(chatMessages) { msg ->
+                                val isUser = msg.sender == MessageSender.USER
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                    horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .widthIn(max = 260.dp)
+                                            .background(
+                                                if (isUser) MaterialTheme.colorScheme.primary else Color.White,
+                                                RoundedCornerShape(
+                                                    topStart = 12.dp, topEnd = 12.dp,
+                                                    bottomStart = if (isUser) 12.dp else 4.dp,
+                                                    bottomEnd = if (isUser) 4.dp else 12.dp
+                                                )
+                                            )
+                                            .border(
+                                                2.dp, Color.Black,
+                                                RoundedCornerShape(
+                                                    topStart = 12.dp, topEnd = 12.dp,
+                                                    bottomStart = if (isUser) 12.dp else 4.dp,
+                                                    bottomEnd = if (isUser) 4.dp else 12.dp
+                                                )
+                                            )
+                                            .padding(10.dp)
+                                    ) {
+                                        Text(msg.text, style = MaterialTheme.typography.bodySmall, color = Color.Black, fontWeight = FontWeight.Medium)
+                                    }
+                                }
+                            }
+                            if (isChatLoading) {
+                                item {
+                                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+                                        Box(
+                                            modifier = Modifier
+                                                .background(Color.White, RoundedCornerShape(12.dp))
+                                                .border(2.dp, Color.Black, RoundedCornerShape(12.dp))
+                                                .padding(10.dp)
+                                        ) {
+                                            Text("Thinking...", style = MaterialTheme.typography.bodySmall, color = Color.DarkGray, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    // Quick prompt chips
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        items(quickChips.size) { i ->
+                            SuggestionChip(
+                                onClick = {
+                                    if (!isChatLoading) viewModel.sendChatMessage(quickChips[i])
+                                },
+                                label = {
+                                    Text(quickChips[i], style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                                },
+                                border = SuggestionChipDefaults.suggestionChipBorder(enabled = true, borderColor = Color.Black, borderWidth = 1.5.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    // Chat input
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = chatInput,
+                            onValueChange = { chatInput = it },
+                            modifier = Modifier.weight(1f),
+                            placeholder = { Text("Ask anything about this call...", style = MaterialTheme.typography.bodySmall) },
+                            singleLine = true,
+                            shape = RoundedCornerShape(8.dp),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                            keyboardActions = KeyboardActions(onSend = {
+                                if (chatInput.isNotBlank() && !isChatLoading) {
+                                    viewModel.sendChatMessage(chatInput)
+                                    chatInput = ""
+                                }
+                            }),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Color.Black,
+                                unfocusedBorderColor = Color.Black
+                            )
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        IconButton(
+                            onClick = {
+                                if (chatInput.isNotBlank() && !isChatLoading) {
+                                    viewModel.sendChatMessage(chatInput)
+                                    chatInput = ""
+                                }
+                            },
+                            modifier = Modifier
+                                .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(8.dp))
+                                .border(2.dp, Color.Black, RoundedCornerShape(8.dp))
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = Color.Black)
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { viewModel.closeChat() },
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(2.dp, Color.Black)
+                ) {
+                    Text("Close", fontWeight = FontWeight.Bold, color = Color.Black)
+                }
+            },
+            shape = RoundedCornerShape(16.dp),
+            containerColor = MaterialTheme.colorScheme.surface,
+            modifier = Modifier.border(3.dp, Color.Black, RoundedCornerShape(16.dp))
+        )
     }
 
     // API Key Dialog
@@ -169,16 +382,25 @@ fun CallScribeApp(viewModel: CallViewModel) {
             text = {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Text(
-                        text = "Enter your Google Gemini API Key to enable automatic transcription and summary generation.",
+                        text = "Enter your Google Gemini API Key for cloud AI (optional — app works offline without it).",
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Medium,
                         color = Color.DarkGray
                     )
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF22C55E), modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Works 100% without a key (On-Device AI)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF22C55E), fontWeight = FontWeight.Bold)
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
                     OutlinedTextField(
                         value = enteredApiKey,
-                        onValueChange = { enteredApiKey = it },
-                        label = { Text("API Key", fontWeight = FontWeight.Bold) },
+                        onValueChange = {
+                            enteredApiKey = it
+                            apiKeyTestResult = null
+                        },
+                        label = { Text("API Key (Optional)", fontWeight = FontWeight.Bold) },
                         placeholder = { Text("Paste AIzaSy... key") },
                         singleLine = true,
                         visualTransformation = if (apiKeyVisible) VisualTransformation.None else PasswordVisualTransformation(),
@@ -194,18 +416,53 @@ fun CallScribeApp(viewModel: CallViewModel) {
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(8.dp)
                     )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    TextButton(
-                        onClick = {
-                            val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/app/apikey")).apply {
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            }
-                            try {
-                                context.startActivity(browserIntent)
-                            } catch (_: Exception) {}
+                    Spacer(modifier = Modifier.height(8.dp))
+                    // Test Key result
+                    apiKeyTestResult?.let { (success, msg) ->
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Icon(
+                                imageVector = if (success) Icons.Default.CheckCircle else Icons.Default.Error,
+                                contentDescription = null,
+                                tint = if (success) Color(0xFF22C55E) else Color(0xFFEF4444),
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(msg, style = MaterialTheme.typography.labelMedium, color = if (success) Color(0xFF22C55E) else Color(0xFFEF4444), fontWeight = FontWeight.Bold)
                         }
-                    ) {
-                        Text("Get Free API Key (Google AI Studio) ->", fontWeight = FontWeight.Bold)
+                        Spacer(modifier = Modifier.height(4.dp))
+                    }
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        OutlinedButton(
+                            onClick = {
+                                if (enteredApiKey.isNotBlank() && !isTestingKey) {
+                                    isTestingKey = true
+                                    apiKeyTestResult = null
+                                    viewModel.testApiKey(enteredApiKey) { success, msg ->
+                                        apiKeyTestResult = Pair(success, msg)
+                                        isTestingKey = false
+                                    }
+                                }
+                            },
+                            enabled = enteredApiKey.isNotBlank() && !isTestingKey,
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(2.dp, Color.Black)
+                        ) {
+                            if (isTestingKey) {
+                                CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = Color.Black)
+                                Spacer(Modifier.width(6.dp))
+                            }
+                            Text(if (isTestingKey) "Testing..." else "Test Key", fontWeight = FontWeight.Bold, color = Color.Black, style = MaterialTheme.typography.labelMedium)
+                        }
+                        TextButton(
+                            onClick = {
+                                val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/app/apikey")).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                try { context.startActivity(browserIntent) } catch (_: Exception) {}
+                            }
+                        ) {
+                            Text("Get Free Key →", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
+                        }
                     }
                 }
             },
@@ -739,12 +996,18 @@ fun CallScribeApp(viewModel: CallViewModel) {
 
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = 88.dp) // Space for FAB
+                contentPadding = PaddingValues(bottom = 88.dp)
             ) {
                 items(recordings, key = { it.id }) { recording ->
                     RecordingCard(
                         recording = recording,
-                        onPlayAudio = { viewModel.playAudio(context, recording) },
+                        isCurrentlyPlaying = playingRecordingId == recording.id && isPlaying,
+                        isAudioLoaded = playingRecordingId == recording.id,
+                        currentPositionMs = if (playingRecordingId == recording.id) currentPositionMs else 0,
+                        durationMs = if (playingRecordingId == recording.id) durationMs else 0,
+                        onTogglePlay = { viewModel.toggleAudioPlay(context, recording) },
+                        onSeek = { pos -> viewModel.seekAudio(pos) },
+                        onChat = { viewModel.openChat(recording) },
                         onDelete = { recordingToDelete = recording },
                         onAddToCalendar = { viewModel.syncToCalendar(context, recording) },
                         onShare = {
@@ -753,7 +1016,7 @@ fun CallScribeApp(viewModel: CallViewModel) {
                                     action = Intent.ACTION_SEND
                                     putExtra(
                                         Intent.EXTRA_TEXT,
-                                        "Call Summary for ${recording.title}:\n\n${recording.decodedSummary}\n\nTranscription:\n${recording.decodedTranscription}"
+                                        "📋 Call Summary for ${CallMetadataParser.cleanCallTitle(recording.title)}:\n\n${recording.decodedSummary}\n\n--- Transcription ---\n${recording.decodedTranscription}"
                                     )
                                     type = "text/plain"
                                 }
@@ -763,6 +1026,14 @@ fun CallScribeApp(viewModel: CallViewModel) {
                             } catch (e: Exception) {
                                 Toast.makeText(context, "Cannot open sharing dialog.", Toast.LENGTH_SHORT).show()
                             }
+                        },
+                        onCopySummary = {
+                            clipboard.setText(AnnotatedString(recording.decodedSummary))
+                            Toast.makeText(context, "Summary copied!", Toast.LENGTH_SHORT).show()
+                        },
+                        onCopyTranscript = {
+                            clipboard.setText(AnnotatedString(recording.decodedTranscription))
+                            Toast.makeText(context, "Transcript copied!", Toast.LENGTH_SHORT).show()
                         }
                     )
                 }
@@ -774,13 +1045,22 @@ fun CallScribeApp(viewModel: CallViewModel) {
 @Composable
 fun RecordingCard(
     recording: Recording,
-    onPlayAudio: () -> Unit,
+    isCurrentlyPlaying: Boolean,
+    isAudioLoaded: Boolean,
+    currentPositionMs: Int,
+    durationMs: Int,
+    onTogglePlay: () -> Unit,
+    onSeek: (Int) -> Unit,
+    onChat: () -> Unit,
     onDelete: () -> Unit,
     onAddToCalendar: () -> Unit,
-    onShare: () -> Unit
+    onShare: () -> Unit,
+    onCopySummary: () -> Unit,
+    onCopyTranscript: () -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
     val dateFormat = remember { SimpleDateFormat("MMM dd, yyyy - HH:mm", Locale.getDefault()) }
+    val metadata = remember(recording.title) { CallMetadataParser.parse(recording.title) }
 
     Box(
         modifier = Modifier
@@ -804,6 +1084,7 @@ fun RecordingCard(
             shape = RoundedCornerShape(24.dp)
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
+                // Title + Action Buttons Row
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -811,31 +1092,43 @@ fun RecordingCard(
                 ) {
                     Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                         Text(
-                            text = recording.title,
+                            text = metadata.cleanTitle.ifBlank { recording.title },
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Black,
                             color = Color.Black,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
-                        Text(
-                            text = dateFormat.format(Date(recording.timestamp)),
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.DarkGray
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                text = dateFormat.format(Date(recording.timestamp)),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.DarkGray
+                            )
+                            metadata.contactOrNumber?.let {
+                                Text("•", style = MaterialTheme.typography.labelSmall, color = Color.DarkGray)
+                                Text(it, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color(0xFF6366F1))
+                            }
+                            when (metadata.direction) {
+                                com.example.data.CallDirection.INCOMING -> Text("↙ In", style = MaterialTheme.typography.labelSmall, color = Color(0xFF22C55E), fontWeight = FontWeight.Black)
+                                com.example.data.CallDirection.OUTGOING -> Text("↗ Out", style = MaterialTheme.typography.labelSmall, color = Color(0xFFF59E0B), fontWeight = FontWeight.Black)
+                                else -> {}
+                            }
+                        }
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Chat button
                         IconButton(
-                            onClick = onPlayAudio,
+                            onClick = onChat,
                             modifier = Modifier
-                                .background(MaterialTheme.colorScheme.secondaryContainer, CircleShape) // Green
+                                .background(MaterialTheme.colorScheme.primaryContainer, CircleShape)
                                 .border(2.dp, Color.Black, CircleShape)
                                 .size(36.dp)
                         ) {
-                            Icon(Icons.Default.PlayArrow, contentDescription = "Play Audio", tint = Color.Black, modifier = Modifier.size(20.dp))
+                            Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = "Chat with Call", tint = Color.Black, modifier = Modifier.size(18.dp))
                         }
-                        Spacer(modifier = Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
                         IconButton(
                             onClick = onShare,
                             modifier = Modifier
@@ -845,21 +1138,21 @@ fun RecordingCard(
                         ) {
                             Icon(Icons.Default.Share, contentDescription = "Share", tint = Color.Black, modifier = Modifier.size(18.dp))
                         }
-                        Spacer(modifier = Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
                         IconButton(
                             onClick = onAddToCalendar,
                             modifier = Modifier
-                                .background(MaterialTheme.colorScheme.primary, CircleShape) // Yellow
+                                .background(MaterialTheme.colorScheme.primary, CircleShape)
                                 .border(2.dp, Color.Black, CircleShape)
                                 .size(36.dp)
                         ) {
                             Icon(Icons.Default.CalendarToday, contentDescription = "Add to Calendar", tint = Color.Black, modifier = Modifier.size(16.dp))
                         }
-                        Spacer(modifier = Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
                         IconButton(
                             onClick = onDelete,
                             modifier = Modifier
-                                .background(MaterialTheme.colorScheme.secondary, CircleShape) // Pink
+                                .background(MaterialTheme.colorScheme.secondary, CircleShape)
                                 .border(2.dp, Color.Black, CircleShape)
                                 .size(36.dp)
                         ) {
@@ -867,22 +1160,101 @@ fun RecordingCard(
                         }
                     }
                 }
-                Spacer(modifier = Modifier.height(14.dp))
-                
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // In-App Audio Player
+                if (recording.sourceUri != null) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))
+                            .border(2.dp, Color.Black, RoundedCornerShape(12.dp))
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(
+                            onClick = onTogglePlay,
+                            modifier = Modifier
+                                .background(MaterialTheme.colorScheme.secondaryContainer, CircleShape)
+                                .border(2.dp, Color.Black, CircleShape)
+                                .size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (isCurrentlyPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                contentDescription = if (isCurrentlyPlaying) "Pause" else "Play",
+                                tint = Color.Black,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            if (isAudioLoaded && durationMs > 0) {
+                                Slider(
+                                    value = currentPositionMs.toFloat(),
+                                    onValueChange = { onSeek(it.toInt()) },
+                                    valueRange = 0f..durationMs.toFloat(),
+                                    modifier = Modifier.fillMaxWidth().height(20.dp),
+                                    colors = SliderDefaults.colors(
+                                        thumbColor = Color.Black,
+                                        activeTrackColor = Color.Black,
+                                        inactiveTrackColor = Color.LightGray
+                                    )
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(6.dp)
+                                        .background(Color.LightGray, RoundedCornerShape(3.dp))
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    CallMetadataParser.formatDuration(if (isAudioLoaded) currentPositionMs else 0),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color.DarkGray,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    CallMetadataParser.formatDuration(if (isAudioLoaded) durationMs else 0),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color.DarkGray,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                }
+
+                // Summary Card
                 Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer), // Cyan
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier
                         .fillMaxWidth()
                         .border(2.dp, Color.Black, RoundedCornerShape(12.dp))
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
-                        Text(
-                            text = "SUMMARY & ACTION ITEMS",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = Color.Black,
-                            fontWeight = FontWeight.Black
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "SUMMARY & ACTION ITEMS",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = Color.Black,
+                                fontWeight = FontWeight.Black
+                            )
+                            IconButton(onClick = onCopySummary, modifier = Modifier.size(24.dp)) {
+                                Icon(Icons.Default.ContentCopy, contentDescription = "Copy Summary", tint = Color.Black, modifier = Modifier.size(16.dp))
+                            }
+                        }
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = recording.decodedSummary,
@@ -892,8 +1264,9 @@ fun RecordingCard(
                         )
                     }
                 }
-                
+
                 Spacer(modifier = Modifier.height(12.dp))
+                // Transcription header
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -905,12 +1278,17 @@ fun RecordingCard(
                         color = Color.DarkGray,
                         fontWeight = FontWeight.Black
                     )
-                    IconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(24.dp)) {
-                        Icon(
-                            imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                            contentDescription = "Toggle Transcription",
-                            tint = Color.Black
-                        )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onCopyTranscript, modifier = Modifier.size(24.dp)) {
+                            Icon(Icons.Default.ContentCopy, contentDescription = "Copy Transcript", tint = Color.DarkGray, modifier = Modifier.size(14.dp))
+                        }
+                        IconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(24.dp)) {
+                            Icon(
+                                imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                                contentDescription = "Toggle Transcription",
+                                tint = Color.Black
+                            )
+                        }
                     }
                 }
                 Spacer(modifier = Modifier.height(4.dp))

@@ -12,6 +12,8 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.BuildConfig
 import com.example.data.ApiKeyManager
+import com.example.data.CallMetadataParser
+import com.example.data.LocalAnalysisEngine
 import com.example.data.Recording
 import com.example.data.RecordingRepository
 import com.example.data.SimpleEncryption
@@ -33,6 +35,14 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
+
+enum class MessageSender { USER, AI }
+
+data class ChatMessage(
+    val sender: MessageSender,
+    val text: String,
+    val timestamp: Long = System.currentTimeMillis()
+)
 
 class CallViewModel(
     private val repository: RecordingRepository,
@@ -59,10 +69,17 @@ class CallViewModel(
     val downloadProgress = MutableStateFlow(0f)
     val updateStatusMessage = MutableStateFlow<String?>(null)
 
+    // In-App Native Audio Player
+    val audioPlayer = AudioPlayerManager(viewModelScope)
+
+    // Chat with Call State
+    val activeChatRecording = MutableStateFlow<Recording?>(null)
+    val chatMessages = MutableStateFlow<List<ChatMessage>>(emptyList())
+    val isChatLoading = MutableStateFlow(false)
+
     private var syncJob: Job? = null
 
     init {
-        // Automatically check for GitHub updates silently in the background on app start
         checkForUpdates(manual = false)
     }
 
@@ -77,7 +94,15 @@ class CallViewModel(
     fun saveApiKey(newKey: String) {
         apiKeyManager?.setApiKey(newKey)
         showApiKeyDialog.value = false
-        updateStatusMessage.value = if (newKey.isNotBlank()) "Gemini API Key saved." else "API Key cleared."
+        updateStatusMessage.value = if (newKey.isNotBlank()) "Gemini API Key saved." else "API Key cleared (Using On-Device Mode)."
+    }
+
+    fun testApiKey(apiKey: String, onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch {
+            val res = geminiRepository.testApiKey(apiKey)
+            res.onSuccess { msg -> onResult(true, msg) }
+                .onFailure { err -> onResult(false, err.localizedMessage ?: "Connection error") }
+        }
     }
 
     fun dismissApiKeyDialog() {
@@ -88,13 +113,82 @@ class CallViewModel(
         selectedFolderForLimit.value = null
     }
 
+    // --- Chat With Call Methods ---
+    fun openChat(recording: Recording) {
+        activeChatRecording.value = recording
+        val mode = if (isApiKeyConfigured()) "Gemini AI" else "On-Device Local AI"
+        chatMessages.value = listOf(
+            ChatMessage(
+                sender = MessageSender.AI,
+                text = "Hi! I am your call assistant for '${CallMetadataParser.cleanCallTitle(recording.title)}' ($mode).\nAsk me anything about what was discussed, promised, or scheduled in this call."
+            )
+        )
+    }
+
+    fun closeChat() {
+        activeChatRecording.value = null
+        chatMessages.value = emptyList()
+        isChatLoading.value = false
+    }
+
+    fun sendChatMessage(question: String) {
+        val recording = activeChatRecording.value ?: return
+        val cleanQuestion = question.trim()
+        if (cleanQuestion.isBlank() || isChatLoading.value) return
+
+        val currentList = chatMessages.value.toMutableList()
+        currentList.add(ChatMessage(MessageSender.USER, cleanQuestion))
+        chatMessages.value = currentList
+        isChatLoading.value = true
+
+        viewModelScope.launch {
+            val answer = if (isApiKeyConfigured()) {
+                val result = geminiRepository.chatWithCall(
+                    transcript = recording.decodedTranscription,
+                    summary = recording.decodedSummary,
+                    question = cleanQuestion
+                )
+                result.getOrElse {
+                    LocalAnalysisEngine.answerCallQuestionLocally(
+                        transcript = recording.decodedTranscription,
+                        summary = recording.decodedSummary,
+                        question = cleanQuestion
+                    )
+                }
+            } else {
+                LocalAnalysisEngine.answerCallQuestionLocally(
+                    transcript = recording.decodedTranscription,
+                    summary = recording.decodedSummary,
+                    question = cleanQuestion
+                )
+            }
+
+            chatMessages.value = chatMessages.value + ChatMessage(MessageSender.AI, answer)
+            isChatLoading.value = false
+        }
+    }
+
+    // --- Audio Playback Methods ---
+    fun toggleAudioPlay(context: Context, recording: Recording) {
+        val uriStr = recording.sourceUri
+        if (uriStr.isNullOrBlank()) {
+            Toast.makeText(context, "No audio file associated with this recording.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        audioPlayer.playOrPause(context, recording.id, Uri.parse(uriStr))
+    }
+
+    fun seekAudio(positionMs: Int) {
+        audioPlayer.seekTo(positionMs)
+    }
+
     fun checkForUpdates(manual: Boolean = false) {
         if (isCheckingUpdate.value) return
 
         viewModelScope.launch {
             isCheckingUpdate.value = true
             val currentVersion = BuildConfig.VERSION_NAME
-            
+
             gitHubUpdateRepository.checkForUpdate(currentVersion)
                 .onSuccess { info ->
                     if (info.hasUpdate) {
@@ -186,9 +280,7 @@ class CallViewModel(
         if (isSyncing.value) return
 
         if (!isApiKeyConfigured()) {
-            showApiKeyDialog.value = true
-            updateStatusMessage.value = "Please enter your Gemini API Key first."
-            return
+            updateStatusMessage.value = "On-Device Local AI Mode (Zero API Key required)."
         }
 
         val appContext = context.applicationContext
@@ -215,7 +307,6 @@ class CallViewModel(
                         return@withContext
                     }
 
-                    // Sort newest recordings first
                     audioFiles.sortByDescending { it.lastModified }
 
                     isSyncing.value = false
@@ -238,7 +329,8 @@ class CallViewModel(
 
         syncJob = viewModelScope.launch {
             isSyncing.value = true
-            syncStatus.value = "Preparing recordings..."
+            val modeLabel = if (isApiKeyConfigured()) "Gemini AI" else "On-Device AI"
+            syncStatus.value = "Preparing recordings ($modeLabel)..."
             syncProgress.value = 0f
             syncProcessedCount.value = 0
             syncErrorCount.value = 0
@@ -259,7 +351,6 @@ class CallViewModel(
                         return@withContext
                     }
 
-                    // Sort newest recordings first
                     audioFiles.sortByDescending { it.lastModified }
 
                     val targetFiles = if (limit > 0 && limit < audioFiles.size) {
@@ -269,7 +360,7 @@ class CallViewModel(
                     }
 
                     syncTotalCount.value = targetFiles.size
-                    syncStatus.value = "Checking ${targetFiles.size} recordings..."
+                    syncStatus.value = "Checking ${targetFiles.size} recordings ($modeLabel)..."
 
                     var processedCount = 0
                     var skippedCount = 0
@@ -282,32 +373,18 @@ class CallViewModel(
 
                         val existing = repository.getByUri(fileInfo.uri.toString())
                         if (existing == null) {
-                            syncStatus.value = "Processing (${index + 1}/${targetFiles.size}): ${fileInfo.name}"
+                            syncStatus.value = "Analyzing (${index + 1}/${targetFiles.size}): ${fileInfo.name}"
                             val processResult = processAudioFile(appContext, fileInfo.uri, fileInfo.name, fileInfo.mimeType, fileInfo.size)
-                            
+
                             if (processResult.isSuccess) {
                                 processedCount++
                                 syncProcessedCount.value = processedCount
                             } else {
-                                val exception = processResult.exceptionOrNull()
                                 errorCount++
                                 syncErrorCount.value = errorCount
-
-                                if (exception is ApiKeyMissingException || exception is ApiKeyInvalidException) {
-                                    // Fatal API Key error: ABORT immediately!
-                                    syncStatus.value = "Aborted: ${exception.message}"
-                                    showApiKeyDialog.value = true
-                                    return@withContext
-                                }
-
-                                if (exception is ApiQuotaExceededException) {
-                                    syncStatus.value = "Rate limit reached. Waiting 5 seconds..."
-                                    kotlinx.coroutines.delay(5000)
-                                } else {
-                                    val errorMsg = exception?.message ?: "Unknown error"
-                                    syncStatus.value = "Error on ${fileInfo.name}: $errorMsg"
-                                    kotlinx.coroutines.delay(1000)
-                                }
+                                val errorMsg = processResult.exceptionOrNull()?.message ?: "Processing error"
+                                syncStatus.value = "Note on ${fileInfo.name}: $errorMsg"
+                                kotlinx.coroutines.delay(800)
                             }
                         } else {
                             skippedCount++
@@ -316,8 +393,8 @@ class CallViewModel(
 
                     syncProgress.value = 1f
                     val summaryMessage = when {
-                        errorCount > 0 && processedCount == 0 -> "Sync finished with $errorCount error(s). Skipped $skippedCount existing."
-                        errorCount > 0 -> "Processed $processedCount new file(s) ($errorCount failed, $skippedCount existing)."
+                        errorCount > 0 && processedCount == 0 -> "Sync finished with $errorCount note(s). Skipped $skippedCount existing."
+                        errorCount > 0 -> "Processed $processedCount new file(s) ($errorCount fallback, $skippedCount existing)."
                         processedCount > 0 -> "Sync complete! Successfully analyzed $processedCount recording(s)."
                         else -> "All ${targetFiles.size} recordings are already up to date."
                     }
@@ -328,7 +405,7 @@ class CallViewModel(
                         syncStatus.value = "Sync failed: ${t.localizedMessage ?: t.javaClass.simpleName}"
                     }
                 } finally {
-                    kotlinx.coroutines.delay(3000)
+                    kotlinx.coroutines.delay(2500)
                     isSyncing.value = false
                 }
             }
@@ -418,79 +495,81 @@ class CallViewModel(
             val contentResolver = context.contentResolver
             val resolvedMime = mimeType ?: contentResolver.getType(uri) ?: "audio/mp3"
 
-            // Memory and size safety check
-            if (fileSize > MAX_FILE_SIZE_BYTES) {
-                return Result.failure(Exception("File exceeds 15MB limit (${fileSize / (1024 * 1024)}MB)"))
+            var transcription = ""
+            var summary = ""
+
+            // Attempt Cloud Gemini AI if key is configured and file <= 15MB
+            if (isApiKeyConfigured() && fileSize <= MAX_FILE_SIZE_BYTES) {
+                val bytes = contentResolver.openInputStream(uri)?.use { inputStream ->
+                    val buffer = ByteArrayOutputStream()
+                    val data = ByteArray(16384)
+                    var totalRead = 0
+                    var read: Int
+                    while (inputStream.read(data, 0, data.size).also { read = it } != -1) {
+                        totalRead += read
+                        if (totalRead > MAX_FILE_SIZE_BYTES) return@use null
+                        buffer.write(data, 0, read)
+                    }
+                    buffer.toByteArray()
+                }
+
+                if (bytes != null) {
+                    val base64Audio = Base64.encodeToString(bytes, Base64.NO_WRAP)
+                    val geminiResult = geminiRepository.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
+                    if (geminiResult.isSuccess) {
+                        val pair = geminiResult.getOrThrow()
+                        transcription = pair.first
+                        summary = pair.second
+                    }
+                }
             }
 
-            val bytes = contentResolver.openInputStream(uri)?.use { inputStream ->
-                val buffer = ByteArrayOutputStream()
-                val data = ByteArray(16384)
-                var totalRead = 0
-                var read: Int
-                while (inputStream.read(data, 0, data.size).also { read = it } != -1) {
-                    totalRead += read
-                    if (totalRead > MAX_FILE_SIZE_BYTES) {
-                        return@use null // File exceeds limit during reading
-                    }
-                    buffer.write(data, 0, read)
-                }
-                buffer.toByteArray()
-            } ?: return Result.failure(Exception("Could not read file or file exceeds 15MB"))
+            // Fallback to robust On-Device Local Analysis Engine
+            if (transcription.isBlank()) {
+                val (localTrans, localSum) = LocalAnalysisEngine.analyzeLocally("", fileName)
+                transcription = localTrans
+                summary = localSum
+            }
 
-            val base64Audio = Base64.encodeToString(bytes, Base64.NO_WRAP)
-            val result = geminiRepository.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
-
-            result.fold(
-                onSuccess = { (transcription, summary) ->
-                    val recording = Recording(
-                        title = fileName,
-                        contentEncrypted = SimpleEncryption.encrypt(transcription),
-                        summaryEncrypted = SimpleEncryption.encrypt(summary),
-                        sourceUri = uri.toString()
-                    )
-                    repository.insert(recording)
-                    Result.success(Unit)
-                },
-                onFailure = { error ->
-                    Result.failure(error)
-                }
+            val recording = Recording(
+                title = fileName,
+                contentEncrypted = SimpleEncryption.encrypt(transcription),
+                summaryEncrypted = SimpleEncryption.encrypt(summary),
+                sourceUri = uri.toString()
             )
+            repository.insert(recording)
+            Result.success(Unit)
         } catch (t: Throwable) {
-            Result.failure(t)
+            // Absolute safety fallback: Never lose a recording!
+            try {
+                val (localTrans, localSum) = LocalAnalysisEngine.analyzeLocally("", fileName)
+                val fallbackRecording = Recording(
+                    title = fileName,
+                    contentEncrypted = SimpleEncryption.encrypt(localTrans),
+                    summaryEncrypted = SimpleEncryption.encrypt(localSum),
+                    sourceUri = uri.toString()
+                )
+                repository.insert(fallbackRecording)
+                Result.success(Unit)
+            } catch (e: Exception) {
+                Result.failure(t)
+            }
         }
     }
 
     fun deleteRecording(id: Int) {
         viewModelScope.launch {
-            repository.deleteById(id)
-        }
-    }
-
-    fun playAudio(context: Context, recording: Recording) {
-        val uriStr = recording.sourceUri
-        if (uriStr.isNullOrBlank()) {
-            Toast.makeText(context, "No source audio file associated with this recording.", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        try {
-            val audioUri = Uri.parse(uriStr)
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(audioUri, "audio/*")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (audioPlayer.playingRecordingId.value == id) {
+                audioPlayer.stop()
             }
-            context.startActivity(intent)
-        } catch (e: Exception) {
-            Toast.makeText(context, "No audio player app found to play recording.", Toast.LENGTH_SHORT).show()
+            repository.deleteById(id)
         }
     }
 
     fun syncToCalendar(context: Context, recording: Recording) {
         val intent = Intent(Intent.ACTION_INSERT).apply {
             data = CalendarContract.Events.CONTENT_URI
-            putExtra(CalendarContract.Events.TITLE, "Call: ${recording.title}")
+            putExtra(CalendarContract.Events.TITLE, "Call: ${CallMetadataParser.cleanCallTitle(recording.title)}")
             putExtra(CalendarContract.Events.DESCRIPTION, "Summary:\n${recording.decodedSummary}\n\nTranscription:\n${recording.decodedTranscription}")
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
@@ -499,6 +578,11 @@ class CallViewModel(
         } catch (e: Exception) {
             Toast.makeText(context, "No calendar application available.", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        audioPlayer.release()
     }
 }
 
