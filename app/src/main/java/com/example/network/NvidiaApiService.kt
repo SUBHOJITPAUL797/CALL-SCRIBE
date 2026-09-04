@@ -19,9 +19,9 @@ class NvidiaRepository(
 
         // Active flagship models on integrate.api.nvidia.com
         private val CHAT_MODELS = listOf(
-            "nvidia/llama-3.1-nemotron-70b-instruct",
-            "mistralai/mistral-large-2-instruct",
             "meta/llama-3.2-11b-vision-instruct",
+            "meta/llama-3.2-90b-vision-instruct",
+            "nvidia/llama-3.1-nemotron-70b-instruct",
             "google/gemma-3-12b-it"
         )
 
