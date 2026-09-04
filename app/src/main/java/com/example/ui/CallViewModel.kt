@@ -23,6 +23,7 @@ import com.example.network.ApiQuotaExceededException
 import com.example.network.AppUpdateInfo
 import com.example.network.GeminiRepository
 import com.example.network.GitHubUpdateRepository
+import com.example.network.NvidiaRepository
 import com.example.update.AppUpdateManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -48,7 +49,8 @@ class CallViewModel(
     private val repository: RecordingRepository,
     private val geminiRepository: GeminiRepository,
     private val gitHubUpdateRepository: GitHubUpdateRepository = GitHubUpdateRepository(),
-    private val apiKeyManager: ApiKeyManager? = null
+    private val apiKeyManager: ApiKeyManager? = null,
+    private val nvidiaRepository: NvidiaRepository? = null
 ) : ViewModel() {
 
     val searchQuery = MutableStateFlow("")
@@ -68,6 +70,7 @@ class CallViewModel(
     val isDownloadingUpdate = MutableStateFlow(false)
     val downloadProgress = MutableStateFlow(0f)
     val updateStatusMessage = MutableStateFlow<String?>(null)
+    private val skippedUpdateVersion = MutableStateFlow<String?>(null)
 
     // In-App Native Audio Player
     val audioPlayer = AudioPlayerManager(viewModelScope)
@@ -83,31 +86,48 @@ class CallViewModel(
         checkForUpdates(manual = false)
     }
 
-    fun isApiKeyConfigured(): Boolean {
-        return geminiRepository.isApiKeyConfigured()
-    }
+    fun isApiKeyConfigured(): Boolean = geminiRepository.isApiKeyConfigured()
 
-    fun getApiKey(): String {
-        return apiKeyManager?.getApiKey() ?: BuildConfig.GEMINI_API_KEY
-    }
+    fun isNvidiaKeyConfigured(): Boolean = nvidiaRepository?.isApiKeyConfigured() == true
+
+    fun getApiKey(): String = apiKeyManager?.getApiKey() ?: BuildConfig.GEMINI_API_KEY
+
+    fun getNvidiaApiKey(): String = apiKeyManager?.getNvidiaApiKey() ?: ""
 
     fun saveApiKey(newKey: String) {
         apiKeyManager?.setApiKey(newKey)
         showApiKeyDialog.value = false
-        updateStatusMessage.value = if (newKey.isNotBlank()) "Gemini API Key saved." else "API Key cleared (Using On-Device Mode)."
+        val mode = when {
+            newKey.isNotBlank() -> "Gemini API Key saved ✅"
+            isNvidiaKeyConfigured() -> "Gemini key cleared. NVIDIA fallback still active."
+            else -> "API Key cleared — using On-Device mode."
+        }
+        updateStatusMessage.value = mode
+    }
+
+    fun saveNvidiaApiKey(newKey: String) {
+        apiKeyManager?.setNvidiaApiKey(newKey)
+        updateStatusMessage.value = if (newKey.isNotBlank()) "NVIDIA API Key saved ✅" else "NVIDIA key cleared."
     }
 
     fun testApiKey(apiKey: String, onResult: (Boolean, String) -> Unit) {
         viewModelScope.launch {
             val res = geminiRepository.testApiKey(apiKey)
             res.onSuccess { msg -> onResult(true, msg) }
-                .onFailure { err -> onResult(false, err.localizedMessage ?: "Connection error") }
+               .onFailure { err -> onResult(false, err.localizedMessage ?: "Connection error") }
         }
     }
 
-    fun dismissApiKeyDialog() {
-        showApiKeyDialog.value = false
+    fun testNvidiaApiKey(apiKey: String, onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch {
+            val tempRepo = NvidiaRepository(apiKeyProvider = { apiKey })
+            val res = tempRepo.testApiKey(apiKey)
+            res.onSuccess { msg -> onResult(true, msg) }
+               .onFailure { err -> onResult(false, err.localizedMessage ?: "Connection error") }
+        }
     }
+
+    fun dismissApiKeyDialog() { showApiKeyDialog.value = false }
 
     fun dismissLimitDialog() {
         selectedFolderForLimit.value = null
@@ -116,7 +136,11 @@ class CallViewModel(
     // --- Chat With Call Methods ---
     fun openChat(recording: Recording) {
         activeChatRecording.value = recording
-        val mode = if (isApiKeyConfigured()) "Gemini AI" else "On-Device Local AI"
+        val mode = when {
+            isApiKeyConfigured() -> "Gemini AI"
+            isNvidiaKeyConfigured() -> "NVIDIA Llama AI"
+            else -> "On-Device AI"
+        }
         chatMessages.value = listOf(
             ChatMessage(
                 sender = MessageSender.AI,
@@ -142,24 +166,50 @@ class CallViewModel(
         isChatLoading.value = true
 
         viewModelScope.launch {
-            val answer = if (isApiKeyConfigured()) {
-                val result = geminiRepository.chatWithCall(
-                    transcript = recording.decodedTranscription,
-                    summary = recording.decodedSummary,
-                    question = cleanQuestion
-                )
-                result.getOrElse {
-                    LocalAnalysisEngine.answerCallQuestionLocally(
+            val answer = when {
+                // 1. Try Gemini first
+                isApiKeyConfigured() -> {
+                    val geminiResult = geminiRepository.chatWithCall(
                         transcript = recording.decodedTranscription,
                         summary = recording.decodedSummary,
                         question = cleanQuestion
                     )
+                    if (geminiResult.isSuccess) {
+                        geminiResult.getOrThrow()
+                    } else {
+                        // 2. Gemini failed → try NVIDIA
+                        val nvidiaResult = nvidiaRepository?.chatWithCall(
+                            transcript = recording.decodedTranscription,
+                            summary = recording.decodedSummary,
+                            question = cleanQuestion
+                        )
+                        nvidiaResult?.getOrElse {
+                            LocalAnalysisEngine.answerCallQuestionLocally(
+                                recording.decodedTranscription, recording.decodedSummary, cleanQuestion
+                            )
+                        } ?: LocalAnalysisEngine.answerCallQuestionLocally(
+                            recording.decodedTranscription, recording.decodedSummary, cleanQuestion
+                        )
+                    }
                 }
-            } else {
-                LocalAnalysisEngine.answerCallQuestionLocally(
-                    transcript = recording.decodedTranscription,
-                    summary = recording.decodedSummary,
-                    question = cleanQuestion
+                // 2. No Gemini → try NVIDIA
+                isNvidiaKeyConfigured() -> {
+                    val nvidiaResult = nvidiaRepository?.chatWithCall(
+                        transcript = recording.decodedTranscription,
+                        summary = recording.decodedSummary,
+                        question = cleanQuestion
+                    )
+                    nvidiaResult?.getOrElse {
+                        LocalAnalysisEngine.answerCallQuestionLocally(
+                            recording.decodedTranscription, recording.decodedSummary, cleanQuestion
+                        )
+                    } ?: LocalAnalysisEngine.answerCallQuestionLocally(
+                        recording.decodedTranscription, recording.decodedSummary, cleanQuestion
+                    )
+                }
+                // 3. No keys → on-device
+                else -> LocalAnalysisEngine.answerCallQuestionLocally(
+                    recording.decodedTranscription, recording.decodedSummary, cleanQuestion
                 )
             }
 
@@ -189,12 +239,15 @@ class CallViewModel(
             isCheckingUpdate.value = true
             val currentVersion = BuildConfig.VERSION_NAME
 
-            gitHubUpdateRepository.checkForUpdate(currentVersion)
+            gitHubUpdateRepository.checkForUpdate(
+                currentVersion = currentVersion,
+                skippedVersion = skippedUpdateVersion.value
+            )
                 .onSuccess { info ->
                     if (info.hasUpdate) {
                         updateInfo.value = info
                     } else if (manual) {
-                        updateStatusMessage.value = "App is up to date (v$currentVersion)"
+                        updateStatusMessage.value = "✅ App is up to date (v$currentVersion)"
                     }
                 }
                 .onFailure { error ->
@@ -206,7 +259,17 @@ class CallViewModel(
         }
     }
 
+    /** Permanently dismiss the update dialog — don't show again for this version */
     fun dismissUpdateDialog() {
+        updateInfo.value = null
+    }
+
+    /** Skip this specific version — won't be shown again until a newer release */
+    fun skipThisUpdate() {
+        val version = updateInfo.value?.latestVersionName
+        if (version != null) {
+            skippedUpdateVersion.value = version
+        }
         updateInfo.value = null
     }
 
@@ -482,7 +545,27 @@ class CallViewModel(
         }
     }
 
-    private val MAX_FILE_SIZE_BYTES = 15L * 1024 * 1024 // 15 MB safe inline limit
+    private val MAX_FILE_SIZE_GEMINI = 15L * 1024 * 1024  // 15 MB — Gemini inline limit
+    private val MAX_FILE_SIZE_NVIDIA = 25L * 1024 * 1024  // 25 MB — NVIDIA ASR limit
+
+    private suspend fun readAudioBytes(
+        context: Context,
+        uri: Uri,
+        maxBytes: Long
+    ): ByteArray? = withContext(Dispatchers.IO) {
+        context.contentResolver.openInputStream(uri)?.use { stream ->
+            val buffer = ByteArrayOutputStream()
+            val chunk = ByteArray(16384)
+            var total = 0L
+            var read: Int
+            while (stream.read(chunk, 0, chunk.size).also { read = it } != -1) {
+                total += read
+                if (total > maxBytes) return@use null
+                buffer.write(chunk, 0, read)
+            }
+            buffer.toByteArray()
+        }
+    }
 
     private suspend fun processAudioFile(
         context: Context,
@@ -498,21 +581,9 @@ class CallViewModel(
             var transcription = ""
             var summary = ""
 
-            // Attempt Cloud Gemini AI if key is configured and file <= 15MB
-            if (isApiKeyConfigured() && fileSize <= MAX_FILE_SIZE_BYTES) {
-                val bytes = contentResolver.openInputStream(uri)?.use { inputStream ->
-                    val buffer = ByteArrayOutputStream()
-                    val data = ByteArray(16384)
-                    var totalRead = 0
-                    var read: Int
-                    while (inputStream.read(data, 0, data.size).also { read = it } != -1) {
-                        totalRead += read
-                        if (totalRead > MAX_FILE_SIZE_BYTES) return@use null
-                        buffer.write(data, 0, read)
-                    }
-                    buffer.toByteArray()
-                }
-
+            // ── Step 1: Try Gemini (primary, cloud, best quality) ──────────────
+            if (isApiKeyConfigured() && fileSize <= MAX_FILE_SIZE_GEMINI) {
+                val bytes = readAudioBytes(context, uri, MAX_FILE_SIZE_GEMINI)
                 if (bytes != null) {
                     val base64Audio = Base64.encodeToString(bytes, Base64.NO_WRAP)
                     val geminiResult = geminiRepository.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
@@ -521,10 +592,26 @@ class CallViewModel(
                         transcription = pair.first
                         summary = pair.second
                     }
+                    // If Gemini failed with quota, we fall through to NVIDIA below
                 }
             }
 
-            // Fallback to robust On-Device Local Analysis Engine
+            // ── Step 2: Try NVIDIA (fallback when Gemini unavailable/quota) ──
+            if (transcription.isBlank() && isNvidiaKeyConfigured() && fileSize <= MAX_FILE_SIZE_NVIDIA) {
+                val bytes = readAudioBytes(context, uri, MAX_FILE_SIZE_NVIDIA)
+                if (bytes != null) {
+                    // ASR: get transcript
+                    val asrResult = nvidiaRepository?.transcribeAudio(bytes, fileName, resolvedMime)
+                    if (asrResult?.isSuccess == true) {
+                        transcription = asrResult.getOrThrow()
+                        // LLM: summarize transcript
+                        val sumResult = nvidiaRepository.summarizeTranscript(transcription, fileName)
+                        summary = sumResult.getOrElse { "Summary unavailable." }
+                    }
+                }
+            }
+
+            // ── Step 3: Local on-device fallback ─────────────────────────────
             if (transcription.isBlank()) {
                 val (localTrans, localSum) = LocalAnalysisEngine.analyzeLocally("", fileName)
                 transcription = localTrans
@@ -540,16 +627,15 @@ class CallViewModel(
             repository.insert(recording)
             Result.success(Unit)
         } catch (t: Throwable) {
-            // Absolute safety fallback: Never lose a recording!
+            // Absolute safety net — NEVER lose a recording entry
             try {
                 val (localTrans, localSum) = LocalAnalysisEngine.analyzeLocally("", fileName)
-                val fallbackRecording = Recording(
+                repository.insert(Recording(
                     title = fileName,
                     contentEncrypted = SimpleEncryption.encrypt(localTrans),
                     summaryEncrypted = SimpleEncryption.encrypt(localSum),
                     sourceUri = uri.toString()
-                )
-                repository.insert(fallbackRecording)
+                ))
                 Result.success(Unit)
             } catch (e: Exception) {
                 Result.failure(t)
@@ -590,12 +676,15 @@ class CallViewModelFactory(
     private val repository: RecordingRepository,
     private val geminiRepository: GeminiRepository,
     private val gitHubUpdateRepository: GitHubUpdateRepository = GitHubUpdateRepository(),
-    private val apiKeyManager: ApiKeyManager? = null
+    private val apiKeyManager: ApiKeyManager? = null,
+    private val nvidiaRepository: NvidiaRepository? = null
 ) : ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(CallViewModel::class.java)) {
             @Suppress("UNCHECKED_CAST")
-            return CallViewModel(repository, geminiRepository, gitHubUpdateRepository, apiKeyManager) as T
+            return CallViewModel(
+                repository, geminiRepository, gitHubUpdateRepository, apiKeyManager, nvidiaRepository
+            ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
     }

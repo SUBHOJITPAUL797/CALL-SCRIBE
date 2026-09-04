@@ -7,6 +7,7 @@ import com.example.data.AppDatabase
 import com.example.data.RecordingRepository
 import com.example.network.GeminiRepository
 import com.example.network.GitHubUpdateRepository
+import com.example.network.NvidiaRepository
 
 object DefaultAppContainer {
     @Volatile
@@ -24,6 +25,11 @@ object DefaultAppContainer {
     fun getGeminiRepository(context: Context): GeminiRepository {
         val keyManager = getApiKeyManager(context)
         return GeminiRepository(apiKeyProvider = { keyManager.getApiKey() })
+    }
+
+    fun getNvidiaRepository(context: Context): NvidiaRepository {
+        val keyManager = getApiKeyManager(context)
+        return NvidiaRepository(apiKeyProvider = { keyManager.getNvidiaApiKey() })
     }
 
     val gitHubUpdateRepository: GitHubUpdateRepository by lazy {

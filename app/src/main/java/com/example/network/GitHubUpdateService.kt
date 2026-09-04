@@ -31,6 +31,7 @@ data class GitHubAsset(
 data class AppUpdateInfo(
     val hasUpdate: Boolean,
     val latestVersionName: String,
+    val latestVersionClean: String,  // e.g. "1.2.1" (no "v" prefix)
     val releaseTitle: String,
     val releaseNotes: String,
     val downloadUrl: String?,
@@ -60,12 +61,13 @@ object GitHubRetrofitClient {
 }
 
 object VersionComparator {
-    fun cleanVersion(v: String): String {
-        return v.trim().removePrefix("v").removePrefix("V").split("-")[0].trim()
-    }
+    /** Strip "v"/"V" prefix and anything after "-" (e.g. "-beta") */
+    fun cleanVersion(v: String): String =
+        v.trim().removePrefix("v").removePrefix("V").split("-")[0].trim()
 
     /**
-     * Returns true if latest is strictly newer than current.
+     * Returns true only if [latest] is STRICTLY NEWER than [current].
+     * Pads shorter version to same length as longer (e.g. "1.2" == "1.2.0").
      */
     fun isNewer(current: String, latest: String): Boolean {
         val curParts = cleanVersion(current).split(".").mapNotNull { it.toIntOrNull() }
@@ -78,26 +80,39 @@ object VersionComparator {
             if (latNum > curNum) return true
             if (latNum < curNum) return false
         }
-        return false
+        return false // identical
     }
+
+    /** Returns true if [a] and [b] represent the same version (after cleaning) */
+    fun isSameVersion(a: String, b: String): Boolean =
+        cleanVersion(a) == cleanVersion(b)
 }
 
 class GitHubUpdateRepository(
     private val owner: String = "SUBHOJITPAUL797",
     private val repo: String = "CALL-SCRIBE"
 ) {
-    suspend fun checkForUpdate(currentVersion: String): Result<AppUpdateInfo> = withContext(Dispatchers.IO) {
+    suspend fun checkForUpdate(
+        currentVersion: String,
+        skippedVersion: String? = null
+    ): Result<AppUpdateInfo> = withContext(Dispatchers.IO) {
         try {
             val release = GitHubRetrofitClient.service.getLatestRelease(owner, repo)
+            val cleanLatest = VersionComparator.cleanVersion(release.tagName)
             val isNewer = VersionComparator.isNewer(currentVersion, release.tagName)
-            
-            val apkAsset = release.assets.firstOrNull { 
-                it.name.endsWith(".apk", ignoreCase = true) 
+
+            // If user previously skipped this exact version, don't nag them again
+            val isSkipped = skippedVersion != null &&
+                VersionComparator.isSameVersion(skippedVersion, release.tagName)
+
+            val apkAsset = release.assets.firstOrNull {
+                it.name.endsWith(".apk", ignoreCase = true)
             } ?: release.assets.firstOrNull()
 
             val info = AppUpdateInfo(
-                hasUpdate = isNewer,
+                hasUpdate = isNewer && !isSkipped,
                 latestVersionName = release.tagName,
+                latestVersionClean = cleanLatest,
                 releaseTitle = release.name ?: "Release ${release.tagName}",
                 releaseNotes = release.body ?: "No release notes provided.",
                 downloadUrl = apkAsset?.browserDownloadUrl,

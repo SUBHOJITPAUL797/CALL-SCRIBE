@@ -82,6 +82,7 @@ class MainActivity : ComponentActivity() {
         val appContainer = DefaultAppContainer
         val apiKeyManager = appContainer.getApiKeyManager(this)
         val geminiRepository = appContainer.getGeminiRepository(this)
+        val nvidiaRepository = appContainer.getNvidiaRepository(this)
         setContent {
             MyApplicationTheme {
                 val viewModel: CallViewModel = viewModel(
@@ -89,7 +90,8 @@ class MainActivity : ComponentActivity() {
                         appContainer.getRepository(this),
                         geminiRepository,
                         appContainer.gitHubUpdateRepository,
-                        apiKeyManager
+                        apiKeyManager,
+                        nvidiaRepository
                     )
                 )
 
@@ -154,11 +156,19 @@ fun CallScribeApp(viewModel: CallViewModel) {
     var apiKeyTestResult by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
     var isTestingKey by remember { mutableStateOf(false) }
 
+    var enteredNvidiaKey by remember { mutableStateOf("") }
+    var nvidiaKeyVisible by remember { mutableStateOf(false) }
+    var nvidiaKeyTestResult by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
+    var isTestingNvidiaKey by remember { mutableStateOf(false) }
+
     LaunchedEffect(showApiKeyDialog) {
         if (showApiKeyDialog) {
             enteredApiKey = viewModel.getApiKey()
+            enteredNvidiaKey = viewModel.getNvidiaApiKey()
             apiKeyTestResult = null
+            nvidiaKeyTestResult = null
             isTestingKey = false
+            isTestingNvidiaKey = false
         }
     }
 
@@ -376,31 +386,25 @@ fun CallScribeApp(viewModel: CallViewModel) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Default.Key, contentDescription = null, tint = Color.Black)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Gemini API Key", fontWeight = FontWeight.Black, color = Color.Black)
+                    Text("AI API Keys", fontWeight = FontWeight.Black, color = Color.Black)
                 }
             },
             text = {
                 Column(modifier = Modifier.fillMaxWidth()) {
+
+                    // ── Gemini Section ───────────────────────────────────────
+                    Text("🤖 Gemini API Key (Primary)", fontWeight = FontWeight.Black, color = Color.Black, style = MaterialTheme.typography.labelLarge)
+                    Spacer(Modifier.height(2.dp))
                     Text(
-                        text = "Enter your Google Gemini API Key for cloud AI (optional — app works offline without it).",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium,
+                        text = "Best quality — transcription + summary + chat in one step.",
+                        style = MaterialTheme.typography.bodySmall,
                         color = Color.DarkGray
                     )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF22C55E), modifier = Modifier.size(14.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Works 100% without a key (On-Device AI)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF22C55E), fontWeight = FontWeight.Bold)
-                    }
-                    Spacer(modifier = Modifier.height(10.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
                     OutlinedTextField(
                         value = enteredApiKey,
-                        onValueChange = {
-                            enteredApiKey = it
-                            apiKeyTestResult = null
-                        },
-                        label = { Text("API Key (Optional)", fontWeight = FontWeight.Bold) },
+                        onValueChange = { enteredApiKey = it; apiKeyTestResult = null },
+                        label = { Text("Gemini Key (AIzaSy...)", fontWeight = FontWeight.Bold) },
                         placeholder = { Text("Paste AIzaSy... key") },
                         singleLine = true,
                         visualTransformation = if (apiKeyVisible) VisualTransformation.None else PasswordVisualTransformation(),
@@ -408,7 +412,7 @@ fun CallScribeApp(viewModel: CallViewModel) {
                             IconButton(onClick = { apiKeyVisible = !apiKeyVisible }) {
                                 Icon(
                                     imageVector = if (apiKeyVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                    contentDescription = "Toggle key visibility",
+                                    contentDescription = "Toggle visibility",
                                     tint = Color.Black
                                 )
                             }
@@ -416,64 +420,123 @@ fun CallScribeApp(viewModel: CallViewModel) {
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(8.dp)
                     )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    // Test Key result
+                    Spacer(modifier = Modifier.height(4.dp))
                     apiKeyTestResult?.let { (success, msg) ->
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
-                                imageVector = if (success) Icons.Default.CheckCircle else Icons.Default.Error,
-                                contentDescription = null,
+                                if (success) Icons.Default.CheckCircle else Icons.Default.Error,
+                                null,
                                 tint = if (success) Color(0xFF22C55E) else Color(0xFFEF4444),
-                                modifier = Modifier.size(16.dp)
+                                modifier = Modifier.size(14.dp)
                             )
-                            Spacer(Modifier.width(6.dp))
-                            Text(msg, style = MaterialTheme.typography.labelMedium, color = if (success) Color(0xFF22C55E) else Color(0xFFEF4444), fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.width(4.dp))
+                            Text(msg, style = MaterialTheme.typography.labelSmall, color = if (success) Color(0xFF22C55E) else Color(0xFFEF4444), fontWeight = FontWeight.Bold)
                         }
-                        Spacer(modifier = Modifier.height(4.dp))
+                        Spacer(Modifier.height(2.dp))
                     }
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         OutlinedButton(
                             onClick = {
                                 if (enteredApiKey.isNotBlank() && !isTestingKey) {
-                                    isTestingKey = true
-                                    apiKeyTestResult = null
-                                    viewModel.testApiKey(enteredApiKey) { success, msg ->
-                                        apiKeyTestResult = Pair(success, msg)
-                                        isTestingKey = false
-                                    }
+                                    isTestingKey = true; apiKeyTestResult = null
+                                    viewModel.testApiKey(enteredApiKey) { ok, msg -> apiKeyTestResult = Pair(ok, msg); isTestingKey = false }
                                 }
                             },
                             enabled = enteredApiKey.isNotBlank() && !isTestingKey,
-                            shape = RoundedCornerShape(8.dp),
-                            border = BorderStroke(2.dp, Color.Black)
+                            shape = RoundedCornerShape(8.dp), border = BorderStroke(2.dp, Color.Black)
                         ) {
-                            if (isTestingKey) {
-                                CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = Color.Black)
-                                Spacer(Modifier.width(6.dp))
-                            }
-                            Text(if (isTestingKey) "Testing..." else "Test Key", fontWeight = FontWeight.Bold, color = Color.Black, style = MaterialTheme.typography.labelMedium)
+                            if (isTestingKey) { CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 2.dp, color = Color.Black); Spacer(Modifier.width(4.dp)) }
+                            Text(if (isTestingKey) "Testing..." else "Test", fontWeight = FontWeight.Bold, color = Color.Black, style = MaterialTheme.typography.labelMedium)
                         }
-                        TextButton(
+                        TextButton(onClick = {
+                            try { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/app/apikey")).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }) } catch (_: Exception) {}
+                        }) { Text("Get Free Key →", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold) }
+                    }
+
+                    Spacer(Modifier.height(12.dp))
+                    androidx.compose.material3.Divider(color = Color.LightGray)
+                    Spacer(Modifier.height(12.dp))
+
+                    // ── NVIDIA Section ───────────────────────────────────────
+                    Text("⚡ NVIDIA API Key (Fallback)", fontWeight = FontWeight.Black, color = Color.Black, style = MaterialTheme.typography.labelLarge)
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = "Used automatically when Gemini hits its free quota. Llama 3.1 70B + Canary ASR.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.DarkGray
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedTextField(
+                        value = enteredNvidiaKey,
+                        onValueChange = { enteredNvidiaKey = it; nvidiaKeyTestResult = null },
+                        label = { Text("NVIDIA NIM Key (nvapi-...)", fontWeight = FontWeight.Bold) },
+                        placeholder = { Text("Paste nvapi-... key") },
+                        singleLine = true,
+                        visualTransformation = if (nvidiaKeyVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            IconButton(onClick = { nvidiaKeyVisible = !nvidiaKeyVisible }) {
+                                Icon(
+                                    imageVector = if (nvidiaKeyVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = "Toggle visibility",
+                                    tint = Color.Black
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    nvidiaKeyTestResult?.let { (success, msg) ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                if (success) Icons.Default.CheckCircle else Icons.Default.Error,
+                                null,
+                                tint = if (success) Color(0xFF22C55E) else Color(0xFFEF4444),
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(msg, style = MaterialTheme.typography.labelSmall, color = if (success) Color(0xFF22C55E) else Color(0xFFEF4444), fontWeight = FontWeight.Bold)
+                        }
+                        Spacer(Modifier.height(2.dp))
+                    }
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        OutlinedButton(
                             onClick = {
-                                val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/app/apikey")).apply {
-                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                if (enteredNvidiaKey.isNotBlank() && !isTestingNvidiaKey) {
+                                    isTestingNvidiaKey = true; nvidiaKeyTestResult = null
+                                    viewModel.testNvidiaApiKey(enteredNvidiaKey) { ok, msg -> nvidiaKeyTestResult = Pair(ok, msg); isTestingNvidiaKey = false }
                                 }
-                                try { context.startActivity(browserIntent) } catch (_: Exception) {}
-                            }
+                            },
+                            enabled = enteredNvidiaKey.isNotBlank() && !isTestingNvidiaKey,
+                            shape = RoundedCornerShape(8.dp), border = BorderStroke(2.dp, Color(0xFF76B900))
                         ) {
-                            Text("Get Free Key →", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
+                            if (isTestingNvidiaKey) { CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 2.dp, color = Color(0xFF76B900)); Spacer(Modifier.width(4.dp)) }
+                            Text(if (isTestingNvidiaKey) "Testing..." else "Test", fontWeight = FontWeight.Bold, color = Color(0xFF76B900), style = MaterialTheme.typography.labelMedium)
                         }
+                        TextButton(onClick = {
+                            try { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://build.nvidia.com")).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }) } catch (_: Exception) {}
+                        }) { Text("Get Free Key →", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = Color(0xFF76B900)) }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.CheckCircle, null, tint = Color(0xFF22C55E), modifier = Modifier.size(13.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("App works offline with no keys (On-Device AI)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF22C55E), fontWeight = FontWeight.Bold)
                     }
                 }
             },
             confirmButton = {
                 Button(
-                    onClick = { viewModel.saveApiKey(enteredApiKey) },
+                    onClick = {
+                        viewModel.saveApiKey(enteredApiKey)
+                        viewModel.saveNvidiaApiKey(enteredNvidiaKey)
+                    },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                     shape = RoundedCornerShape(8.dp),
                     border = BorderStroke(2.dp, Color.Black)
                 ) {
-                    Text("Save Key", fontWeight = FontWeight.Bold, color = Color.Black)
+                    Text("Save Keys", fontWeight = FontWeight.Bold, color = Color.Black)
                 }
             },
             dismissButton = {
@@ -713,6 +776,15 @@ fun CallScribeApp(viewModel: CallViewModel) {
                         colors = ButtonDefaults.outlinedButtonColors(containerColor = Color.White)
                     ) {
                         Text("GitHub", fontWeight = FontWeight.Bold, color = Color.Black)
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                    OutlinedButton(
+                        onClick = { viewModel.skipThisUpdate() },
+                        enabled = !isDownloadingUpdate,
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(2.dp, Color(0xFF888888))
+                    ) {
+                        Text("Skip", color = Color(0xFF888888))
                     }
                     Spacer(modifier = Modifier.width(6.dp))
                     OutlinedButton(
