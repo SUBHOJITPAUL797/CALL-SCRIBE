@@ -6,11 +6,13 @@ import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
 import retrofit2.http.Body
 import retrofit2.http.POST
+import retrofit2.http.Path
 import retrofit2.http.Query
 import java.util.concurrent.TimeUnit
 import com.example.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 
 @JsonClass(generateAdapter = true)
 data class GenerateContentRequest(
@@ -55,8 +57,9 @@ data class Candidate(
 )
 
 interface GeminiApiService {
-    @POST("v1beta/models/gemini-1.5-flash:generateContent")
+    @POST("v1beta/models/{model}:generateContent")
     suspend fun generateContent(
+        @Path("model") model: String,
         @Query("key") apiKey: String,
         @Body request: GenerateContentRequest
     ): GenerateContentResponse
@@ -118,27 +121,49 @@ object GeminiResponseParser {
             val transcription = trimmed.substring(0, summaryHeaderStart).trim()
             val summary = trimmed.substring(summaryStart).trim()
             return Pair(
-                transcription.ifBlank { "Transcription not separated." },
+                transcription.ifBlank { "No transcription content." },
                 summary.ifBlank { "No summary generated." }
             )
         }
 
-        val paragraphs = trimmed.split("\n\n").filter { it.isNotBlank() }
-        return if (paragraphs.size > 1) {
-            Pair(paragraphs.dropLast(1).joinToString("\n\n").trim(), paragraphs.last().trim())
-        } else {
-            Pair(trimmed, "No separate summary section generated.")
-        }
+        return Pair(trimmed, "See transcription for complete call details.")
     }
 }
-
-class ApiKeyMissingException(message: String = "Gemini API key is not configured. Please enter your API key in Settings.") : Exception(message)
-class ApiKeyInvalidException(message: String = "Invalid Gemini API key. Please check your key in Settings.") : Exception(message)
-class ApiQuotaExceededException(message: String = "Gemini API quota exceeded or rate limit reached. Please wait a moment.") : Exception(message)
 
 class GeminiRepository(
     private val apiKeyProvider: () -> String = { BuildConfig.GEMINI_API_KEY }
 ) {
+    companion object {
+        // Modern models in order of priority for freshly created & existing Google AI Studio keys
+        val CANDIDATE_MODELS = listOf(
+            "gemini-2.0-flash",
+            "gemini-2.5-flash",
+            "gemini-1.5-flash",
+            "gemini-1.5-flash-8b"
+        )
+    }
+
+    private suspend fun executeWithModelFallback(
+        apiKey: String,
+        request: GenerateContentRequest
+    ): Pair<String, GenerateContentResponse> {
+        var lastException: retrofit2.HttpException? = null
+        for (model in CANDIDATE_MODELS) {
+            try {
+                val response = RetrofitClient.service.generateContent(model, apiKey, request)
+                return Pair(model, response)
+            } catch (e: retrofit2.HttpException) {
+                if (e.code() == 404) {
+                    // Model deprecated or not enabled for this project, try next candidate
+                    lastException = e
+                    continue
+                }
+                throw e
+            }
+        }
+        throw (lastException ?: Exception("No available Gemini model found."))
+    }
+
     fun isApiKeyConfigured(): Boolean {
         val key = apiKeyProvider().trim()
         return key.isNotBlank() &&
@@ -175,7 +200,7 @@ class GeminiRepository(
             generationConfig = GenerationConfig(temperature = 0.2f)
         )
         try {
-            val response = RetrofitClient.service.generateContent(apiKey, request)
+            val (_, response) = executeWithModelFallback(apiKey, request)
             response.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text ?: "No summary generated."
         } catch (e: Exception) {
             "Error generating summary: ${e.localizedMessage ?: e.message}"
@@ -247,7 +272,7 @@ Do NOT skip any section. Do NOT summarize too briefly. The user needs to know ev
             generationConfig = GenerationConfig(temperature = 0.1f)
         )
         try {
-            val response = RetrofitClient.service.generateContent(apiKey, request)
+            val (_, response) = executeWithModelFallback(apiKey, request)
             val fullText = response.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
             if (fullText.isNullOrBlank()) {
                 val finishReason = response.candidates?.firstOrNull()?.finishReason
@@ -285,20 +310,28 @@ Do NOT skip any section. Do NOT summarize too briefly. The user needs to know ev
             generationConfig = GenerationConfig(temperature = 0.1f)
         )
         try {
-            val response = RetrofitClient.service.generateContent(trimmed, request)
+            val (workingModel, response) = executeWithModelFallback(trimmed, request)
             if (response.candidates?.isNotEmpty() == true) {
-                Result.success("✅ API Key is valid and working!")
+                Result.success("✅ API Key is valid and working ($workingModel)!")
             } else {
-                Result.success("✅ Connected to Gemini successfully.")
+                Result.success("✅ Connected to Gemini ($workingModel).")
             }
         } catch (e: retrofit2.HttpException) {
             val code = e.code()
+            val errorBody = try { e.response()?.errorBody()?.string() } catch (_: Exception) { null }
+            val errorMsg = if (!errorBody.isNullOrBlank()) {
+                try {
+                    val json = JSONObject(errorBody)
+                    json.optJSONObject("error")?.optString("message", "") ?: errorBody
+                } catch (_: Exception) { errorBody }
+            } else e.message()
+
             if (code == 400 || code == 401 || code == 403) {
-                Result.failure(ApiKeyInvalidException("Invalid API key (HTTP $code). Please verify in Google AI Studio."))
+                Result.failure(ApiKeyInvalidException("Invalid API key (HTTP $code): $errorMsg"))
             } else if (code == 429) {
                 Result.success("✅ Key is valid, but current quota/rate limit is reached.")
             } else {
-                Result.failure(Exception("HTTP $code: ${e.message()}"))
+                Result.failure(Exception("HTTP $code: $errorMsg"))
             }
         } catch (e: Throwable) {
             Result.failure(Exception(e.localizedMessage ?: "Connection error", e))
@@ -344,7 +377,7 @@ Do NOT skip any section. Do NOT summarize too briefly. The user needs to know ev
         )
 
         try {
-            val response = RetrofitClient.service.generateContent(apiKey, request)
+            val (_, response) = executeWithModelFallback(apiKey, request)
             val answer = response.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
             if (!answer.isNullOrBlank()) {
                 Result.success(answer.trim())
@@ -356,3 +389,9 @@ Do NOT skip any section. Do NOT summarize too briefly. The user needs to know ev
         }
     }
 }
+
+open class GeminiApiException(message: String, cause: Throwable? = null) : Exception(message, cause)
+class ApiKeyMissingException(message: String = "API Key is missing.") : GeminiApiException(message)
+class ApiKeyInvalidException(message: String = "API Key is invalid.") : GeminiApiException(message)
+class ApiQuotaExceededException(message: String = "API Quota exceeded.") : GeminiApiException(message)
+
