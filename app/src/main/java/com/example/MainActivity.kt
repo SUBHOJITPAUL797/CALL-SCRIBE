@@ -230,13 +230,16 @@ fun CallScribeApp(viewModel: CallViewModel) {
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    if (!viewModel.isApiKeyConfigured()) {
-                        Spacer(Modifier.height(4.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF22C55E), modifier = Modifier.size(14.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("On-Device AI (No Key Required)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF22C55E), fontWeight = FontWeight.Bold)
-                        }
+                    val (modeLabel, modeColor) = when {
+                        viewModel.isApiKeyConfigured() -> "Gemini Cloud AI" to Color(0xFF1A73E8)
+                        viewModel.isNvidiaKeyConfigured() -> "NVIDIA Llama AI" to Color(0xFF76B900)
+                        else -> "On-Device AI (No Key Required)" to Color(0xFF22C55E)
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.CheckCircle, contentDescription = null, tint = modeColor, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(modeLabel, style = MaterialTheme.typography.labelSmall, color = modeColor, fontWeight = FontWeight.Bold)
                     }
                 }
             },
@@ -1106,6 +1109,9 @@ fun CallScribeApp(viewModel: CallViewModel) {
                         onCopyTranscript = {
                             clipboard.setText(AnnotatedString(recording.decodedTranscription))
                             Toast.makeText(context, "Transcript copied!", Toast.LENGTH_SHORT).show()
+                        },
+                        onReanalyze = {
+                            viewModel.reanalyzeRecording(context, recording)
                         }
                     )
                 }
@@ -1128,7 +1134,8 @@ fun RecordingCard(
     onAddToCalendar: () -> Unit,
     onShare: () -> Unit,
     onCopySummary: () -> Unit,
-    onCopyTranscript: () -> Unit
+    onCopyTranscript: () -> Unit,
+    onReanalyze: () -> Unit = {}
 ) {
     var expanded by remember { mutableStateOf(false) }
     val dateFormat = remember { SimpleDateFormat("MMM dd, yyyy - HH:mm", Locale.getDefault()) }
@@ -1334,6 +1341,17 @@ fun RecordingCard(
                             color = Color.Black,
                             fontWeight = FontWeight.Bold
                         )
+                        if (recording.decodedSummary.contains("Not Available") || recording.decodedTranscription.contains("Transcription requires")) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Button(
+                                onClick = onReanalyze,
+                                colors = ButtonDefaults.buttonColors(containerColor = Color.Black),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("⚡ Transcribe & Analyze Call", fontWeight = FontWeight.Bold, color = Color.White)
+                            }
+                        }
                     }
                 }
 

@@ -435,9 +435,22 @@ class CallViewModel(
                         syncProgress.value = (index.toFloat() / targetFiles.size.toFloat()).coerceIn(0f, 1f)
 
                         val existing = repository.getByUri(fileInfo.uri.toString())
-                        if (existing == null) {
-                            syncStatus.value = "Analyzing (${index + 1}/${targetFiles.size}): ${fileInfo.name}"
-                            val processResult = processAudioFile(appContext, fileInfo.uri, fileInfo.name, fileInfo.mimeType, fileInfo.size)
+                        val hasRealTranscript = existing != null &&
+                            existing.decodedTranscription.isNotBlank() &&
+                            !existing.decodedTranscription.contains("Transcription requires") &&
+                            !existing.decodedTranscription.contains("On-Device Speech Analysis")
+
+                        if (existing == null || (!hasRealTranscript && isApiKeyConfigured())) {
+                            val actionLabel = if (existing == null) "Analyzing" else "Re-analyzing"
+                            syncStatus.value = "$actionLabel (${index + 1}/${targetFiles.size}): ${fileInfo.name}"
+                            val processResult = processAudioFile(
+                                appContext,
+                                fileInfo.uri,
+                                fileInfo.name,
+                                fileInfo.mimeType,
+                                fileInfo.size,
+                                existingId = existing?.id
+                            )
 
                             if (processResult.isSuccess) {
                                 processedCount++
@@ -572,7 +585,8 @@ class CallViewModel(
         uri: Uri,
         fileName: String,
         mimeType: String?,
-        fileSize: Long
+        fileSize: Long,
+        existingId: Int? = null
     ): Result<Unit> {
         return try {
             val contentResolver = context.contentResolver
@@ -581,7 +595,7 @@ class CallViewModel(
             var transcription = ""
             var summary = ""
 
-            // ── Step 1: Try Gemini (primary, cloud, best quality) ──────────────
+            // ── Step 1: Try Gemini (primary, cloud audio speech-to-text + summary) ──────────────
             if (isApiKeyConfigured() && fileSize <= MAX_FILE_SIZE_GEMINI) {
                 val bytes = readAudioBytes(context, uri, MAX_FILE_SIZE_GEMINI)
                 if (bytes != null) {
@@ -592,22 +606,14 @@ class CallViewModel(
                         transcription = pair.first
                         summary = pair.second
                     }
-                    // If Gemini failed with quota, we fall through to NVIDIA below
                 }
             }
 
-            // ── Step 2: Try NVIDIA (fallback when Gemini unavailable/quota) ──
-            if (transcription.isBlank() && isNvidiaKeyConfigured() && fileSize <= MAX_FILE_SIZE_NVIDIA) {
-                val bytes = readAudioBytes(context, uri, MAX_FILE_SIZE_NVIDIA)
-                if (bytes != null) {
-                    // ASR: get transcript
-                    val asrResult = nvidiaRepository?.transcribeAudio(bytes, fileName, resolvedMime)
-                    if (asrResult?.isSuccess == true) {
-                        transcription = asrResult.getOrThrow()
-                        // LLM: summarize transcript
-                        val sumResult = nvidiaRepository.summarizeTranscript(transcription, fileName)
-                        summary = sumResult.getOrElse { "Summary unavailable." }
-                    }
+            // ── Step 2: Try NVIDIA for Summarization if Gemini produced transcript but no summary ──
+            if (transcription.isNotBlank() && summary.isBlank() && isNvidiaKeyConfigured()) {
+                val sumResult = nvidiaRepository?.summarizeTranscript(transcription, fileName)
+                if (sumResult?.isSuccess == true) {
+                    summary = sumResult.getOrThrow()
                 }
             }
 
@@ -619,6 +625,7 @@ class CallViewModel(
             }
 
             val recording = Recording(
+                id = existingId ?: 0,
                 title = fileName,
                 contentEncrypted = SimpleEncryption.encrypt(transcription),
                 summaryEncrypted = SimpleEncryption.encrypt(summary),
@@ -631,6 +638,7 @@ class CallViewModel(
             try {
                 val (localTrans, localSum) = LocalAnalysisEngine.analyzeLocally("", fileName)
                 repository.insert(Recording(
+                    id = existingId ?: 0,
                     title = fileName,
                     contentEncrypted = SimpleEncryption.encrypt(localTrans),
                     summaryEncrypted = SimpleEncryption.encrypt(localSum),
@@ -640,6 +648,36 @@ class CallViewModel(
             } catch (e: Exception) {
                 Result.failure(t)
             }
+        }
+    }
+
+    fun reanalyzeRecording(context: Context, recording: Recording) {
+        val uriStr = recording.sourceUri ?: return
+        if (!isApiKeyConfigured() && !isNvidiaKeyConfigured()) {
+            updateStatusMessage.value = "⚠️ Please configure an API Key (Gemini or NVIDIA) first."
+            return
+        }
+
+        viewModelScope.launch {
+            updateStatusMessage.value = "Analyzing '${CallMetadataParser.cleanCallTitle(recording.title)}'..."
+            val success = withContext(Dispatchers.IO) {
+                try {
+                    val uri = Uri.parse(uriStr)
+                    val fileSize = try {
+                        context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: 0L
+                    } catch (_: Exception) { 0L }
+                    val mime = context.contentResolver.getType(uri) ?: "audio/mp3"
+                    processAudioFile(
+                        context = context.applicationContext,
+                        uri = uri,
+                        fileName = recording.title,
+                        mimeType = mime,
+                        fileSize = fileSize,
+                        existingId = recording.id
+                    ).isSuccess
+                } catch (_: Exception) { false }
+            }
+            updateStatusMessage.value = if (success) "Analysis complete!" else "Could not analyze recording."
         }
     }
 
