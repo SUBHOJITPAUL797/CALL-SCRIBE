@@ -560,6 +560,9 @@ fun CallScribeApp(viewModel: CallViewModel) {
     // Sync Batch Options Dialog
     if (selectedFolderForLimit != null) {
         val totalCount = folderTotalRecordings
+        val pendingCount by viewModel.folderPendingRecordings.collectAsStateWithLifecycle()
+        val alreadyAnalyzedCount = (totalCount - pendingCount).coerceAtLeast(0)
+
         AlertDialog(
             onDismissRequest = { viewModel.dismissLimitDialog() },
             title = {
@@ -567,51 +570,67 @@ fun CallScribeApp(viewModel: CallViewModel) {
             },
             text = {
                 Column(modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        text = "Found $totalCount call recording(s) in selected folder. Choose how many recent calls to analyze:",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium,
-                        color = Color.DarkGray
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Button(
-                        onClick = { viewModel.startSyncWithLimit(context, 20) },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
-                        shape = RoundedCornerShape(8.dp),
-                        border = BorderStroke(2.dp, Color.Black)
-                    ) {
-                        Text("Latest 20 Calls (Fastest - ~1 min)", fontWeight = FontWeight.Bold, color = Color.Black)
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Button(
-                        onClick = { viewModel.startSyncWithLimit(context, 50) },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
-                        shape = RoundedCornerShape(8.dp),
-                        border = BorderStroke(2.dp, Color.Black)
-                    ) {
-                        Text("Latest 50 Calls (Recommended)", fontWeight = FontWeight.Bold, color = Color.Black)
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Button(
-                        onClick = { viewModel.startSyncWithLimit(context, 100) },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color.White),
-                        shape = RoundedCornerShape(8.dp),
-                        border = BorderStroke(2.dp, Color.Black)
-                    ) {
-                        Text("Latest 100 Calls", fontWeight = FontWeight.Bold, color = Color.Black)
-                    }
-                    if (totalCount > 100) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        OutlinedButton(
+                    if (pendingCount == 0) {
+                        Text(
+                            text = "All $totalCount call recording(s) in this folder are already analyzed! No duplicates will be created.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium,
+                            color = Color.DarkGray
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Button(
                             onClick = { viewModel.startSyncWithLimit(context, totalCount) },
                             modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                             shape = RoundedCornerShape(8.dp),
                             border = BorderStroke(2.dp, Color.Black)
                         ) {
-                            Text("All $totalCount Calls (May take long)", fontWeight = FontWeight.Bold, color = Color.Black)
+                            Text("Re-analyze All $totalCount Calls", fontWeight = FontWeight.Bold, color = Color.Black)
+                        }
+                    } else {
+                        Text(
+                            text = "Found $totalCount call(s) in folder ($alreadyAnalyzedCount already analyzed & excluded, $pendingCount new/pending). Choose how many to analyze:",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium,
+                            color = Color.DarkGray
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        if (pendingCount >= 20) {
+                            Button(
+                                onClick = { viewModel.startSyncWithLimit(context, 20) },
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(2.dp, Color.Black)
+                            ) {
+                                Text("Next 20 Pending Calls (Fastest - ~1 min)", fontWeight = FontWeight.Bold, color = Color.Black)
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+                        if (pendingCount >= 50) {
+                            Button(
+                                onClick = { viewModel.startSyncWithLimit(context, 50) },
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(2.dp, Color.Black)
+                            ) {
+                                Text("Next 50 Pending Calls (Recommended)", fontWeight = FontWeight.Bold, color = Color.Black)
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+                        Button(
+                            onClick = { viewModel.startSyncWithLimit(context, pendingCount) },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color.White),
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(2.dp, Color.Black)
+                        ) {
+                            Text(
+                                text = if (pendingCount == totalCount) "All $pendingCount Calls" else "All $pendingCount Pending Calls",
+                                fontWeight = FontWeight.Bold,
+                                color = Color.Black
+                            )
                         }
                     }
                 }

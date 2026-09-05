@@ -64,6 +64,7 @@ class CallViewModel(
     val showApiKeyDialog = MutableStateFlow(false)
     val selectedFolderForLimit = MutableStateFlow<Uri?>(null)
     val folderTotalRecordings = MutableStateFlow(0)
+    val folderPendingRecordings = MutableStateFlow(0)
 
     val updateInfo = MutableStateFlow<AppUpdateInfo?>(null)
     val isCheckingUpdate = MutableStateFlow(false)
@@ -372,8 +373,22 @@ class CallViewModel(
 
                     audioFiles.sortByDescending { it.lastModified }
 
+                    // Count how many actually need analysis vs already analyzed
+                    var pendingCount = 0
+                    for (file in audioFiles) {
+                        val existing = repository.getByUri(file.uri.toString())
+                        val hasReal = existing != null &&
+                            existing.decodedTranscription.isNotBlank() &&
+                            !existing.decodedTranscription.contains("Transcription requires") &&
+                            !existing.decodedTranscription.contains("On-Device Speech Analysis")
+                        if (!hasReal) {
+                            pendingCount++
+                        }
+                    }
+
                     isSyncing.value = false
                     folderTotalRecordings.value = audioFiles.size
+                    folderPendingRecordings.value = pendingCount
                     selectedFolderForLimit.value = treeUri
                 } catch (t: Throwable) {
                     syncStatus.value = "Scan failed: ${t.localizedMessage ?: t.javaClass.simpleName}"
@@ -416,17 +431,42 @@ class CallViewModel(
 
                     audioFiles.sortByDescending { it.lastModified }
 
-                    val targetFiles = if (limit > 0 && limit < audioFiles.size) {
-                        audioFiles.take(limit)
+                    // Strictly partition into files needing analysis vs already analyzed
+                    val filesNeedingAnalysis = mutableListOf<AudioFileInfo>()
+                    var alreadyAnalyzedCount = 0
+
+                    for (file in audioFiles) {
+                        val existing = repository.getByUri(file.uri.toString())
+                        val hasRealTranscript = existing != null &&
+                            existing.decodedTranscription.isNotBlank() &&
+                            !existing.decodedTranscription.contains("Transcription requires") &&
+                            !existing.decodedTranscription.contains("On-Device Speech Analysis")
+
+                        if (hasRealTranscript) {
+                            alreadyAnalyzedCount++
+                        } else {
+                            filesNeedingAnalysis.add(file)
+                        }
+                    }
+
+                    // If all files in folder are already analyzed, exit immediately with zero API calls & zero duplicates
+                    if (filesNeedingAnalysis.isEmpty()) {
+                        syncStatus.value = "All ${audioFiles.size} recordings are already analyzed & up to date! (0 duplicates)"
+                        isSyncing.value = false
+                        return@withContext
+                    }
+
+                    // Apply limit strictly to the unanalyzed/pending files
+                    val targetFiles = if (limit > 0 && limit < filesNeedingAnalysis.size) {
+                        filesNeedingAnalysis.take(limit)
                     } else {
-                        audioFiles
+                        filesNeedingAnalysis
                     }
 
                     syncTotalCount.value = targetFiles.size
-                    syncStatus.value = "Checking ${targetFiles.size} recordings ($modeLabel)..."
+                    syncStatus.value = "Analyzing ${targetFiles.size} new calls ($alreadyAnalyzedCount already analyzed & excluded)..."
 
                     var processedCount = 0
-                    var skippedCount = 0
                     var errorCount = 0
 
                     for ((index, fileInfo) in targetFiles.withIndex()) {
@@ -435,44 +475,36 @@ class CallViewModel(
                         syncProgress.value = (index.toFloat() / targetFiles.size.toFloat()).coerceIn(0f, 1f)
 
                         val existing = repository.getByUri(fileInfo.uri.toString())
-                        val hasRealTranscript = existing != null &&
-                            existing.decodedTranscription.isNotBlank() &&
-                            !existing.decodedTranscription.contains("Transcription requires") &&
-                            !existing.decodedTranscription.contains("On-Device Speech Analysis")
+                        val actionLabel = if (existing == null) "Analyzing" else "Re-analyzing"
+                        syncStatus.value = "$actionLabel (${index + 1}/${targetFiles.size}): ${fileInfo.name}"
 
-                        if (existing == null || (!hasRealTranscript && isApiKeyConfigured())) {
-                            val actionLabel = if (existing == null) "Analyzing" else "Re-analyzing"
-                            syncStatus.value = "$actionLabel (${index + 1}/${targetFiles.size}): ${fileInfo.name}"
-                            val processResult = processAudioFile(
-                                appContext,
-                                fileInfo.uri,
-                                fileInfo.name,
-                                fileInfo.mimeType,
-                                fileInfo.size,
-                                existingId = existing?.id
-                            )
+                        val processResult = processAudioFile(
+                            appContext,
+                            fileInfo.uri,
+                            fileInfo.name,
+                            fileInfo.mimeType,
+                            fileInfo.size,
+                            existingId = existing?.id
+                        )
 
-                            if (processResult.isSuccess) {
-                                processedCount++
-                                syncProcessedCount.value = processedCount
-                            } else {
-                                errorCount++
-                                syncErrorCount.value = errorCount
-                                val errorMsg = processResult.exceptionOrNull()?.message ?: "Processing error"
-                                syncStatus.value = "Note on ${fileInfo.name}: $errorMsg"
-                                kotlinx.coroutines.delay(800)
-                            }
+                        if (processResult.isSuccess) {
+                            processedCount++
+                            syncProcessedCount.value = processedCount
                         } else {
-                            skippedCount++
+                            errorCount++
+                            syncErrorCount.value = errorCount
+                            val errorMsg = processResult.exceptionOrNull()?.message ?: "Processing error"
+                            syncStatus.value = "Note on ${fileInfo.name}: $errorMsg"
+                            kotlinx.coroutines.delay(800)
                         }
                     }
 
                     syncProgress.value = 1f
                     val summaryMessage = when {
-                        errorCount > 0 && processedCount == 0 -> "Sync finished with $errorCount note(s). Skipped $skippedCount existing."
-                        errorCount > 0 -> "Processed $processedCount new file(s) ($errorCount fallback, $skippedCount existing)."
-                        processedCount > 0 -> "Sync complete! Successfully analyzed $processedCount recording(s)."
-                        else -> "All ${targetFiles.size} recordings are already up to date."
+                        errorCount > 0 && processedCount == 0 -> "Finished with $errorCount note(s). Excluded $alreadyAnalyzedCount already analyzed."
+                        errorCount > 0 -> "Analyzed $processedCount new call(s) ($alreadyAnalyzedCount already analyzed & excluded, 0 duplicates)."
+                        processedCount > 0 -> "Sync complete! Analyzed $processedCount call(s) ($alreadyAnalyzedCount excluded, 0 duplicates)."
+                        else -> "All recordings are up to date ($alreadyAnalyzedCount excluded, 0 duplicates)."
                     }
                     syncStatus.value = summaryMessage
 
