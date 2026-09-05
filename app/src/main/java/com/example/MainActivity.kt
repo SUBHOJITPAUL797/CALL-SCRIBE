@@ -244,7 +244,43 @@ fun CallScribeApp(viewModel: CallViewModel) {
                 }
             },
             text = {
+                val recNeedsTranscription = chatRec.decodedSummary.contains("Not Available") ||
+                    chatRec.decodedTranscription.contains("requires") ||
+                    chatRec.decodedTranscription.contains("On-Device Speech Analysis") ||
+                    !chatRec.decodedSummary.contains("##")
+
                 Column(modifier = Modifier.fillMaxWidth()) {
+                    if (recNeedsTranscription && chatRec.sourceUri != null && (viewModel.isApiKeyConfigured() || viewModel.isNvidiaKeyConfigured())) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 8.dp)
+                                .background(Color(0xFFFEF3C7), RoundedCornerShape(8.dp))
+                                .border(1.5.dp, Color.Black, RoundedCornerShape(8.dp))
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "Call needs AI transcription.",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.Black,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Button(
+                                onClick = {
+                                    viewModel.reanalyzeRecording(context, chatRec)
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color.Black),
+                                shape = RoundedCornerShape(6.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Text("⚡ Transcribe", style = MaterialTheme.typography.labelSmall, color = Color.White, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+
                     // Chat messages
                     Box(
                         modifier = Modifier
@@ -1360,7 +1396,11 @@ fun RecordingCard(
                             color = Color.Black,
                             fontWeight = FontWeight.Bold
                         )
-                        if (recording.decodedSummary.contains("Not Available") || recording.decodedTranscription.contains("Transcription requires")) {
+                        val needsAiTranscription = recording.decodedSummary.contains("Not Available") ||
+                            recording.decodedTranscription.contains("Transcription requires") ||
+                            recording.decodedTranscription.contains("On-Device Speech Analysis") ||
+                            !recording.decodedSummary.contains("##")
+                        if (needsAiTranscription) {
                             Spacer(modifier = Modifier.height(10.dp))
                             Button(
                                 onClick = onReanalyze,

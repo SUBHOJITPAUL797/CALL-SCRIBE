@@ -137,15 +137,29 @@ class CallViewModel(
     // --- Chat With Call Methods ---
     fun openChat(recording: Recording) {
         activeChatRecording.value = recording
+        val hasRealTranscript = recording.decodedTranscription.isNotBlank() &&
+            !recording.decodedTranscription.contains("Transcription requires") &&
+            !recording.decodedTranscription.contains("API Key") &&
+            !recording.decodedTranscription.contains("On-Device Speech Analysis")
+
         val mode = when {
             isApiKeyConfigured() -> "Gemini AI"
             isNvidiaKeyConfigured() -> "NVIDIA Llama AI"
             else -> "On-Device AI"
         }
+
+        val initialText = if (hasRealTranscript) {
+            "Hi! I am your call assistant for '${CallMetadataParser.cleanCallTitle(recording.title)}' ($mode).\nAsk me anything about what was discussed, promised, or scheduled in this call."
+        } else if (isApiKeyConfigured()) {
+            "Hi! This call was saved earlier before your Gemini API key was active.\n\n⚡ Tap '⚡ Transcribe' at the top of this chat (or on the call card) so Gemini can listen to the audio recording!"
+        } else {
+            "Hi! This call has no AI transcript yet. Tap 🔑 in the top bar to set your free Gemini API key."
+        }
+
         chatMessages.value = listOf(
             ChatMessage(
                 sender = MessageSender.AI,
-                text = "Hi! I am your call assistant for '${CallMetadataParser.cleanCallTitle(recording.title)}' ($mode).\nAsk me anything about what was discussed, promised, or scheduled in this call."
+                text = initialText
             )
         )
     }
@@ -165,6 +179,24 @@ class CallViewModel(
         currentList.add(ChatMessage(MessageSender.USER, cleanQuestion))
         chatMessages.value = currentList
         isChatLoading.value = true
+
+        val hasRealTranscript = recording.decodedTranscription.isNotBlank() &&
+            !recording.decodedTranscription.contains("Transcription requires") &&
+            !recording.decodedTranscription.contains("API Key") &&
+            !recording.decodedTranscription.contains("On-Device Speech Analysis")
+
+        if (!hasRealTranscript) {
+            val reply = if (isApiKeyConfigured() && recording.sourceUri != null) {
+                "⚠️ This call has not been transcribed with Gemini yet. Please tap '⚡ Transcribe' at the top of this chat (or on the call card) so I can listen to the recording and answer your question!"
+            } else {
+                LocalAnalysisEngine.answerCallQuestionLocally(
+                    recording.decodedTranscription, recording.decodedSummary, cleanQuestion
+                )
+            }
+            chatMessages.value = chatMessages.value + ChatMessage(MessageSender.AI, reply)
+            isChatLoading.value = false
+            return
+        }
 
         viewModelScope.launch {
             val answer = when {
@@ -490,12 +522,22 @@ class CallViewModel(
                         if (processResult.isSuccess) {
                             processedCount++
                             syncProcessedCount.value = processedCount
+                            // Pacing delay between calls to stay comfortably within Google's 15 RPM free tier limit
+                            if (index < targetFiles.size - 1 && isApiKeyConfigured()) {
+                                kotlinx.coroutines.delay(4000)
+                            }
                         } else {
                             errorCount++
                             syncErrorCount.value = errorCount
-                            val errorMsg = processResult.exceptionOrNull()?.message ?: "Processing error"
-                            syncStatus.value = "Note on ${fileInfo.name}: $errorMsg"
-                            kotlinx.coroutines.delay(800)
+                            val err = processResult.exceptionOrNull()
+                            if (err is ApiQuotaExceededException || err?.message?.contains("429") == true) {
+                                syncStatus.value = "⏳ Gemini rate limit (15/min) reached. Pausing 15s to reset quota..."
+                                kotlinx.coroutines.delay(15000)
+                            } else {
+                                val errorMsg = err?.message ?: "Processing error"
+                                syncStatus.value = "Note on ${fileInfo.name}: $errorMsg"
+                                kotlinx.coroutines.delay(800)
+                            }
                         }
                     }
 
@@ -632,11 +674,21 @@ class CallViewModel(
                 val bytes = readAudioBytes(context, uri, MAX_FILE_SIZE_GEMINI)
                 if (bytes != null) {
                     val base64Audio = Base64.encodeToString(bytes, Base64.NO_WRAP)
-                    val geminiResult = geminiRepository.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
+                    var geminiResult = geminiRepository.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
+
+                    // If rate limit (429) hit, wait 3 seconds and retry once
+                    if (geminiResult.exceptionOrNull() is ApiQuotaExceededException) {
+                        kotlinx.coroutines.delay(3000)
+                        geminiResult = geminiRepository.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
+                    }
+
                     if (geminiResult.isSuccess) {
                         val pair = geminiResult.getOrThrow()
                         transcription = pair.first
                         summary = pair.second
+                    } else if (geminiResult.exceptionOrNull() is ApiQuotaExceededException) {
+                        // Rate limit/quota exceeded: do not overwrite existing call with blank placeholder
+                        return Result.failure(geminiResult.exceptionOrNull()!!)
                     }
                 }
             }
@@ -649,7 +701,7 @@ class CallViewModel(
                 }
             }
 
-            // ── Step 3: Local on-device fallback ─────────────────────────────
+            // ── Step 3: Local on-device fallback (only if not configured or general failure) ─────
             if (transcription.isBlank()) {
                 val (localTrans, localSum) = LocalAnalysisEngine.analyzeLocally("", fileName)
                 transcription = localTrans
@@ -692,7 +744,7 @@ class CallViewModel(
 
         viewModelScope.launch {
             updateStatusMessage.value = "Analyzing '${CallMetadataParser.cleanCallTitle(recording.title)}'..."
-            val success = withContext(Dispatchers.IO) {
+            val result = withContext(Dispatchers.IO) {
                 try {
                     val uri = Uri.parse(uriStr)
                     val fileSize = try {
@@ -706,10 +758,28 @@ class CallViewModel(
                         mimeType = mime,
                         fileSize = fileSize,
                         existingId = recording.id
-                    ).isSuccess
-                } catch (_: Exception) { false }
+                    )
+                } catch (e: Exception) { Result.failure(e) }
             }
-            updateStatusMessage.value = if (success) "Analysis complete!" else "Could not analyze recording."
+
+            if (result.isSuccess) {
+                val updated = withContext(Dispatchers.IO) { repository.getByUri(uriStr) }
+                if (activeChatRecording.value?.id == recording.id && updated != null) {
+                    activeChatRecording.value = updated
+                    chatMessages.value = chatMessages.value + ChatMessage(
+                        MessageSender.AI,
+                        "✅ Call transcribed successfully with Gemini! I now have the full verbatim transcript. Ask me anything about this call!"
+                    )
+                }
+                updateStatusMessage.value = "Analysis complete! ✅"
+            } else {
+                val err = result.exceptionOrNull()
+                if (err is ApiQuotaExceededException || err?.message?.contains("429") == true) {
+                    updateStatusMessage.value = "⏳ Gemini rate limit reached (15 calls/min). Resets in 60s. Please wait!"
+                } else {
+                    updateStatusMessage.value = "Could not analyze: ${err?.localizedMessage ?: "Unknown error"}"
+                }
+            }
         }
     }
 
