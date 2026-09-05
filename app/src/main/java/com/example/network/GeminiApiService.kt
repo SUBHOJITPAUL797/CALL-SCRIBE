@@ -5,6 +5,7 @@ import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
 import retrofit2.http.Body
+import retrofit2.http.GET
 import retrofit2.http.POST
 import retrofit2.http.Path
 import retrofit2.http.Query
@@ -13,6 +14,19 @@ import com.example.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+
+@JsonClass(generateAdapter = true)
+data class ListModelsResponse(
+    val models: List<ModelInfo>? = emptyList()
+)
+
+@JsonClass(generateAdapter = true)
+data class ModelInfo(
+    val name: String,
+    val displayName: String? = null,
+    val description: String? = null,
+    val supportedGenerationMethods: List<String>? = emptyList()
+)
 
 @JsonClass(generateAdapter = true)
 data class GenerateContentRequest(
@@ -57,6 +71,11 @@ data class Candidate(
 )
 
 interface GeminiApiService {
+    @GET("v1beta/models")
+    suspend fun listModels(
+        @Query("key") apiKey: String
+    ): ListModelsResponse
+
     @POST("v1beta/models/{model}:generateContent")
     suspend fun generateContent(
         @Path("model") model: String,
@@ -136,21 +155,76 @@ class GeminiRepository(
     companion object {
         // Modern models in order of priority for freshly created & existing Google AI Studio keys
         val CANDIDATE_MODELS = listOf(
-            "gemini-2.0-flash",
+            "gemini-3.8-flash",
+            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-3.7-flash",
+            "gemini-3.1-pro",
             "gemini-2.5-flash",
-            "gemini-1.5-flash",
-            "gemini-1.5-flash-8b"
+            "gemini-2.0-flash",
+            "gemini-1.5-flash"
         )
+    }
+
+    @Volatile
+    private var cachedWorkingModel: String? = null
+
+    /**
+     * Dynamically discovers available models for the given API key using Google's ModelService.ListModels.
+     * Returns the models supporting generateContent, prioritizing fast flash models.
+     */
+    suspend fun discoverActiveModels(apiKey: String): List<String> = withContext(Dispatchers.IO) {
+        try {
+            val response = RetrofitClient.service.listModels(apiKey)
+            val available = response.models
+                ?.filter { it.supportedGenerationMethods?.contains("generateContent") == true }
+                ?.map { it.name.removePrefix("models/") }
+                ?.distinct()
+                ?: emptyList()
+
+            if (available.isNotEmpty()) {
+                val sorted = available.sortedWith(
+                    compareByDescending<String> { it.contains("3.8-flash") }
+                        .thenByDescending { it.contains("3.5-flash") && !it.contains("lite") }
+                        .thenByDescending { it.contains("3.5-flash-lite") }
+                        .thenByDescending { it.contains("flash") }
+                        .thenByDescending { it.contains("3.") }
+                )
+                return@withContext sorted
+            }
+        } catch (_: Exception) {
+            // If listModels fails, fall back to CANDIDATE_MODELS
+        }
+        return@withContext CANDIDATE_MODELS
     }
 
     private suspend fun executeWithModelFallback(
         apiKey: String,
         request: GenerateContentRequest
     ): Pair<String, GenerateContentResponse> {
-        var lastException: retrofit2.HttpException? = null
-        for (model in CANDIDATE_MODELS) {
+        // 1. Try cached working model if available
+        cachedWorkingModel?.let { model ->
             try {
                 val response = RetrofitClient.service.generateContent(model, apiKey, request)
+                return Pair(model, response)
+            } catch (e: retrofit2.HttpException) {
+                if (e.code() == 404) {
+                    cachedWorkingModel = null
+                } else {
+                    throw e
+                }
+            }
+        }
+
+        // 2. Discover available models from Google AI Studio for this key
+        val discovered = discoverActiveModels(apiKey)
+        val allToTry = (discovered + CANDIDATE_MODELS).distinct()
+
+        var lastException: retrofit2.HttpException? = null
+        for (model in allToTry) {
+            try {
+                val response = RetrofitClient.service.generateContent(model, apiKey, request)
+                cachedWorkingModel = model
                 return Pair(model, response)
             } catch (e: retrofit2.HttpException) {
                 if (e.code() == 404) {
@@ -161,7 +235,7 @@ class GeminiRepository(
                 throw e
             }
         }
-        throw (lastException ?: Exception("No available Gemini model found."))
+        throw (lastException ?: Exception("No available Gemini model found supporting generateContent."))
     }
 
     fun isApiKeyConfigured(): Boolean {
