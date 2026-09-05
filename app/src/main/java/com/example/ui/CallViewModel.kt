@@ -35,13 +35,17 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.withLock
 import java.io.ByteArrayOutputStream
 
 import com.example.data.AutoAnalyzeMode
 import com.example.data.CallPreferencesManager
+import com.example.data.CallerProfile
+import com.example.data.CallerProfileBuilder
 import com.example.data.CommitmentExtractor
 import com.example.sync.CallSyncWorker
 import com.example.sync.NotificationHelper
+import com.example.sync.SyncLock
 
 enum class MessageSender { USER, AI }
 
@@ -79,7 +83,7 @@ class CallViewModel(
     val autoAnalyzeTargets = MutableStateFlow(preferencesManager?.getAutoAnalyzeTargets() ?: emptySet())
     val autoSyncEnabled = MutableStateFlow(preferencesManager?.isAutoSyncEnabled() ?: true)
     val commitmentRemindersEnabled = MutableStateFlow(preferencesManager?.isCommitmentRemindersEnabled() ?: true)
-    val completedActionItemKeys = MutableStateFlow<Set<String>>(emptySet())
+    val completedActionItemKeys = MutableStateFlow<Set<String>>(preferencesManager?.getAllCompletedActionItems() ?: emptySet())
 
     val updateInfo = MutableStateFlow<AppUpdateInfo?>(null)
     val isCheckingUpdate = MutableStateFlow(false)
@@ -95,6 +99,9 @@ class CallViewModel(
     val activeChatRecording = MutableStateFlow<Recording?>(null)
     val chatMessages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val isChatLoading = MutableStateFlow(false)
+
+    // Caller Profile State
+    val selectedCallerProfileKey = MutableStateFlow<String?>(null)
 
     private var syncJob: Job? = null
 
@@ -413,11 +420,12 @@ class CallViewModel(
     }
 
     val recordings = combine(repository.allRecordings, searchQuery) { list, query ->
+        val distinctList = list.distinctBy { it.sourceUri ?: it.id.toString() }
         val trimmedQuery = query.trim()
         if (trimmedQuery.isBlank()) {
-            list
+            distinctList
         } else {
-            list.filter {
+            distinctList.filter {
                 it.title.contains(trimmedQuery, ignoreCase = true) ||
                 it.decodedTranscription.contains(trimmedQuery, ignoreCase = true) ||
                 it.decodedSummary.contains(trimmedQuery, ignoreCase = true)
@@ -426,6 +434,48 @@ class CallViewModel(
     }
     .flowOn(Dispatchers.Default)
     .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Caller Profiles: groups all calls by caller/contact
+    val callerProfiles = combine(recordings, completedActionItemKeys, autoAnalyzeTargets) { recs, completedKeys, targets ->
+        CallerProfileBuilder.buildProfiles(recs, completedKeys, targets)
+    }
+    .flowOn(Dispatchers.Default)
+    .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val selectedCallerProfile = combine(callerProfiles, selectedCallerProfileKey) { profiles, key ->
+        if (key == null) null else profiles.find { it.callerKey == key }
+    }
+    .flowOn(Dispatchers.Default)
+    .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    fun openCallerProfile(callerKey: String) {
+        selectedCallerProfileKey.value = callerKey
+    }
+
+    fun openCallerProfileForRecording(recording: Recording) {
+        val meta = CallMetadataParser.parse(recording.title)
+        val digits = meta.cleanTitle.filter { it.isDigit() }
+        val key = if (digits.length >= 6 && meta.cleanTitle.all { it.isDigit() || it == '+' || it == ' ' || it == '-' || it == '(' || it == ')' }) {
+            digits
+        } else {
+            meta.cleanTitle.trim().lowercase(java.util.Locale.ROOT)
+        }
+        openCallerProfile(key)
+    }
+
+    fun closeCallerProfile() {
+        selectedCallerProfileKey.value = null
+    }
+
+    fun toggleCallerAutoAnalyze(callerTarget: String) {
+        val targets = autoAnalyzeTargets.value
+        val isAlready = targets.any { it.equals(callerTarget, ignoreCase = true) }
+        if (isAlready) {
+            removeAutoAnalyzeTarget(callerTarget)
+        } else {
+            addAutoAnalyzeTarget(callerTarget)
+        }
+    }
 
     fun updateSearchQuery(query: String) {
         searchQuery.value = query
@@ -507,61 +557,65 @@ class CallViewModel(
         val appContext = context.applicationContext
 
         viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val audioFiles = mutableListOf<AudioFileInfo>()
-                val treeDocId = try {
-                    DocumentsContract.getTreeDocumentId(treeUri)
-                } catch (_: Exception) {
-                    DocumentsContract.getDocumentId(treeUri)
-                }
+            SyncLock.mutex.withLock {
+                try {
+                    val audioFiles = mutableListOf<AudioFileInfo>()
+                    val treeDocId = try {
+                        DocumentsContract.getTreeDocumentId(treeUri)
+                    } catch (_: Exception) {
+                        DocumentsContract.getDocumentId(treeUri)
+                    }
 
-                scanDirectoryRecursively(appContext, treeUri, treeDocId, audioFiles, currentDepth = 0, maxDepth = 3)
+                    scanDirectoryRecursively(appContext, treeUri, treeDocId, audioFiles, currentDepth = 0, maxDepth = 3)
 
-                var newDetected = 0
-                for (file in audioFiles) {
-                    val existing = repository.getByUri(file.uri.toString())
-                    if (existing == null) {
-                        val placeholder = Recording(
-                            id = 0,
-                            title = file.name,
-                            contentEncrypted = SimpleEncryption.encrypt(""),
-                            summaryEncrypted = SimpleEncryption.encrypt("Pending AI Analysis\n\nTap ⚡ Transcribe & Analyze Call to view insights."),
-                            timestamp = if (file.lastModified > 0) file.lastModified else System.currentTimeMillis(),
-                            sourceUri = file.uri.toString()
-                        )
-                        val insertedId = repository.insert(placeholder).toInt()
-                        newDetected++
+                    var newDetected = 0
+                    for (file in audioFiles) {
+                        if (file.size <= 0L) continue
 
-                        val mode = preferencesManager?.getAutoAnalyzeMode() ?: AutoAnalyzeMode.UNKNOWN_ONLY
-                        val targets = preferencesManager?.getAutoAnalyzeTargets() ?: emptySet()
-                        val shouldAuto = CallMetadataParser.matchesAutoAnalyzeRule(file.name, mode, targets)
-
-                        if (shouldAuto && (isApiKeyConfigured() || isNvidiaKeyConfigured())) {
-                            processAudioFile(
-                                context = appContext,
-                                uri = file.uri,
-                                fileName = file.name,
-                                mimeType = file.mimeType,
-                                fileSize = file.size,
-                                existingId = insertedId
+                        val existing = repository.getByUri(file.uri.toString())
+                        if (existing == null) {
+                            val placeholder = Recording(
+                                id = 0,
+                                title = file.name,
+                                contentEncrypted = SimpleEncryption.encrypt(""),
+                                summaryEncrypted = SimpleEncryption.encrypt("Pending AI Analysis\n\nTap ⚡ Transcribe & Analyze Call to view insights."),
+                                timestamp = if (file.lastModified > 0) file.lastModified else System.currentTimeMillis(),
+                                sourceUri = file.uri.toString()
                             )
-                            val updatedRec = repository.getById(insertedId)
-                            if (updatedRec != null && preferencesManager?.isCommitmentRemindersEnabled() == true) {
-                                val actions = CommitmentExtractor.extractActionItems(updatedRec.decodedSummary)
-                                val dates = CommitmentExtractor.extractDates(updatedRec.decodedSummary)
-                                NotificationHelper.notifyCommitments(appContext, file.name, actions, dates, insertedId)
+                            val insertedId = repository.insert(placeholder).toInt()
+                            newDetected++
+
+                            val mode = preferencesManager?.getAutoAnalyzeMode() ?: AutoAnalyzeMode.UNKNOWN_ONLY
+                            val targets = preferencesManager?.getAutoAnalyzeTargets() ?: emptySet()
+                            val shouldAuto = CallMetadataParser.matchesAutoAnalyzeRule(file.name, mode, targets)
+
+                            if (shouldAuto && (isApiKeyConfigured() || isNvidiaKeyConfigured())) {
+                                processAudioFile(
+                                    context = appContext,
+                                    uri = file.uri,
+                                    fileName = file.name,
+                                    mimeType = file.mimeType,
+                                    fileSize = file.size,
+                                    existingId = insertedId
+                                )
+                                val updatedRec = repository.getById(insertedId)
+                                if (updatedRec != null && preferencesManager?.isCommitmentRemindersEnabled() == true) {
+                                    val actions = CommitmentExtractor.extractActionItems(updatedRec.decodedSummary)
+                                    val dates = CommitmentExtractor.extractDates(updatedRec.decodedSummary)
+                                    NotificationHelper.notifyCommitments(appContext, file.name, actions, dates, insertedId)
+                                }
+                                NotificationHelper.notifyNewCallDetected(appContext, file.name, insertedId, isAutoAnalyzed = true)
                             }
-                            NotificationHelper.notifyNewCallDetected(appContext, file.name, insertedId, isAutoAnalyzed = true)
                         }
                     }
-                }
 
-                if (newDetected > 0) {
-                    withContext(Dispatchers.Main) {
-                        updateStatusMessage.value = "Detected $newDetected new call recording(s)!"
+                    if (newDetected > 0) {
+                        withContext(Dispatchers.Main) {
+                            updateStatusMessage.value = "Detected $newDetected new call recording(s)!"
+                        }
                     }
+                } catch (_: Exception) {
                 }
-            } catch (_: Exception) {
             }
         }
     }
@@ -582,47 +636,50 @@ class CallViewModel(
             syncErrorCount.value = 0
 
             withContext(Dispatchers.IO) {
-                try {
-                    val audioFiles = mutableListOf<AudioFileInfo>()
-                    val treeDocId = try {
-                        DocumentsContract.getTreeDocumentId(treeUri)
-                    } catch (_: Exception) {
-                        DocumentsContract.getDocumentId(treeUri)
-                    }
-
-                    scanDirectoryRecursively(appContext, treeUri, treeDocId, audioFiles, currentDepth = 0, maxDepth = 3)
-
-                    if (audioFiles.isEmpty()) {
-                        syncStatus.value = "No audio recordings found."
-                        return@withContext
-                    }
-
-                    audioFiles.sortByDescending { it.lastModified }
-
-                    // Strictly partition into files needing analysis vs already analyzed
-                    val filesNeedingAnalysis = mutableListOf<AudioFileInfo>()
-                    var alreadyAnalyzedCount = 0
-
-                    for (file in audioFiles) {
-                        val existing = repository.getByUri(file.uri.toString())
-                        val hasRealTranscript = existing != null &&
-                            existing.decodedTranscription.isNotBlank() &&
-                            !existing.decodedTranscription.contains("Transcription requires") &&
-                            !existing.decodedTranscription.contains("On-Device Speech Analysis")
-
-                        if (hasRealTranscript) {
-                            alreadyAnalyzedCount++
-                        } else {
-                            filesNeedingAnalysis.add(file)
+                SyncLock.mutex.withLock {
+                    try {
+                        val audioFiles = mutableListOf<AudioFileInfo>()
+                        val treeDocId = try {
+                            DocumentsContract.getTreeDocumentId(treeUri)
+                        } catch (_: Exception) {
+                            DocumentsContract.getDocumentId(treeUri)
                         }
-                    }
 
-                    // If all files in folder are already analyzed, exit immediately with zero API calls & zero duplicates
-                    if (filesNeedingAnalysis.isEmpty()) {
-                        syncStatus.value = "All ${audioFiles.size} recordings are already analyzed & up to date! (0 duplicates)"
-                        isSyncing.value = false
-                        return@withContext
-                    }
+                        scanDirectoryRecursively(appContext, treeUri, treeDocId, audioFiles, currentDepth = 0, maxDepth = 3)
+
+                        if (audioFiles.isEmpty()) {
+                            syncStatus.value = "No audio recordings found."
+                            return@withLock
+                        }
+
+                        audioFiles.sortByDescending { it.lastModified }
+
+                        // Strictly partition into files needing analysis vs already analyzed
+                        val filesNeedingAnalysis = mutableListOf<AudioFileInfo>()
+                        var alreadyAnalyzedCount = 0
+
+                        for (file in audioFiles) {
+                            if (file.size <= 0L) continue
+
+                            val existing = repository.getByUri(file.uri.toString())
+                            val hasRealTranscript = existing != null &&
+                                existing.decodedTranscription.isNotBlank() &&
+                                !existing.decodedTranscription.contains("Transcription requires") &&
+                                !existing.decodedTranscription.contains("On-Device Speech Analysis")
+
+                            if (hasRealTranscript) {
+                                alreadyAnalyzedCount++
+                            } else {
+                                filesNeedingAnalysis.add(file)
+                            }
+                        }
+
+                        // If all files in folder are already analyzed, exit immediately with zero API calls & zero duplicates
+                        if (filesNeedingAnalysis.isEmpty()) {
+                            syncStatus.value = "All ${audioFiles.size} recordings are already analyzed & up to date! (0 duplicates)"
+                            isSyncing.value = false
+                            return@withLock
+                        }
 
                     // Apply limit strictly to the unanalyzed/pending files
                     val targetFiles = if (limit > 0 && limit < filesNeedingAnalysis.size) {
@@ -697,6 +754,7 @@ class CallViewModel(
             }
         }
     }
+}
 
     private data class AudioFileInfo(
         val uri: Uri,
@@ -804,10 +862,12 @@ class CallViewModel(
 
             var transcription = ""
             var summary = ""
+            var audioBytes: ByteArray? = null
 
             // ── Step 1: Try Gemini (primary, cloud audio speech-to-text + summary) ──────────────
             if (isApiKeyConfigured() && fileSize <= MAX_FILE_SIZE_GEMINI) {
                 val bytes = readAudioBytes(context, uri, MAX_FILE_SIZE_GEMINI)
+                audioBytes = bytes
                 if (bytes != null) {
                     val base64Audio = Base64.encodeToString(bytes, Base64.NO_WRAP)
                     var geminiResult = geminiRepository.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
@@ -822,14 +882,25 @@ class CallViewModel(
                         val pair = geminiResult.getOrThrow()
                         transcription = pair.first
                         summary = pair.second
-                    } else if (geminiResult.exceptionOrNull() is ApiQuotaExceededException) {
-                        // Rate limit/quota exceeded: do not overwrite existing call with blank placeholder
+                    } else if (geminiResult.exceptionOrNull() is ApiQuotaExceededException && !isNvidiaKeyConfigured()) {
+                        // Rate limit/quota exceeded and no NVIDIA key configured
                         return Result.failure(geminiResult.exceptionOrNull()!!)
                     }
                 }
             }
 
-            // ── Step 2: Try NVIDIA for Summarization if Gemini produced transcript but no summary ──
+            // ── Step 2: Try NVIDIA Canary ASR if Gemini transcription failed / unconfigured ─────────
+            if (transcription.isBlank() && isNvidiaKeyConfigured() && fileSize <= MAX_FILE_SIZE_NVIDIA) {
+                val bytes = audioBytes ?: readAudioBytes(context, uri, MAX_FILE_SIZE_NVIDIA)
+                if (bytes != null) {
+                    val asrRes = nvidiaRepository?.transcribeAudio(bytes, fileName, resolvedMime)
+                    if (asrRes?.isSuccess == true) {
+                        transcription = asrRes.getOrThrow()
+                    }
+                }
+            }
+
+            // ── Step 3: Try NVIDIA for Summarization if we have a transcript but no summary ────────
             if (transcription.isNotBlank() && summary.isBlank() && isNvidiaKeyConfigured()) {
                 val sumResult = nvidiaRepository?.summarizeTranscript(transcription, fileName)
                 if (sumResult?.isSuccess == true) {
@@ -837,7 +908,7 @@ class CallViewModel(
                 }
             }
 
-            // ── Step 3: Local on-device fallback (only if not configured or general failure) ─────
+            // ── Step 4: Local on-device fallback (only if not configured or general failure) ─────
             if (transcription.isBlank()) {
                 val (localTrans, localSum) = LocalAnalysisEngine.analyzeLocally("", fileName)
                 transcription = localTrans
@@ -937,15 +1008,30 @@ class CallViewModel(
             if (audioPlayer.playingRecordingId.value == id) {
                 audioPlayer.stop()
             }
+            if (activeChatRecording.value?.id == id) {
+                closeChat()
+            }
             repository.deleteById(id)
         }
     }
 
     fun syncToCalendar(context: Context, recording: Recording) {
+        val cleanTitle = CallMetadataParser.cleanCallTitle(recording.title)
+        val safeSummary = recording.decodedSummary.take(1500)
+        val safeTranscript = recording.decodedTranscription.take(1500)
+        val description = buildString {
+            if (safeSummary.isNotBlank()) {
+                append("Summary:\n$safeSummary\n\n")
+            }
+            if (safeTranscript.isNotBlank()) {
+                append("Transcription:\n$safeTranscript")
+            }
+        }.trim()
+
         val intent = Intent(Intent.ACTION_INSERT).apply {
             data = CalendarContract.Events.CONTENT_URI
-            putExtra(CalendarContract.Events.TITLE, "Call: ${CallMetadataParser.cleanCallTitle(recording.title)}")
-            putExtra(CalendarContract.Events.DESCRIPTION, "Summary:\n${recording.decodedSummary}\n\nTranscription:\n${recording.decodedTranscription}")
+            putExtra(CalendarContract.Events.TITLE, "Call: $cleanTitle")
+            putExtra(CalendarContract.Events.DESCRIPTION, description)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         try {

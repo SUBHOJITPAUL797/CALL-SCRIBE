@@ -54,12 +54,6 @@ class AudioPlayerManager(private val scope: CoroutineScope) {
         stop()
 
         try {
-            val pfd = context.contentResolver.openFileDescriptor(uri, "r")
-            if (pfd == null) {
-                _playingRecordingId.value = null
-                return
-            }
-
             val newPlayer = MediaPlayer().apply {
                 setAudioAttributes(
                     AudioAttributes.Builder()
@@ -67,9 +61,17 @@ class AudioPlayerManager(private val scope: CoroutineScope) {
                         .setUsage(AudioAttributes.USAGE_MEDIA)
                         .build()
                 )
-                setDataSource(pfd.fileDescriptor)
+                val fdSuccess = context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                    setDataSource(pfd.fileDescriptor)
+                    true
+                } ?: false
+
+                if (!fdSuccess) {
+                    _playingRecordingId.value = null
+                    return
+                }
+
                 prepare()
-                pfd.close()
             }
 
             mediaPlayer = newPlayer

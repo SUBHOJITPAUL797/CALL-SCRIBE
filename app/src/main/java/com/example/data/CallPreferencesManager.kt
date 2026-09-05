@@ -89,6 +89,10 @@ class CallPreferencesManager(context: Context) {
 
     // ── Checked / Completed Action Items Checklist ────────────────────────────
 
+    fun getAllCompletedActionItems(): Set<String> {
+        return prefs.getStringSet(KEY_COMPLETED_ACTION_ITEMS, emptySet()) ?: emptySet()
+    }
+
     fun isActionItemCompleted(recordingId: Int, itemText: String): Boolean {
         val key = "${recordingId}_${itemText.hashCode()}"
         val set = prefs.getStringSet(KEY_COMPLETED_ACTION_ITEMS, emptySet()) ?: emptySet()

@@ -73,9 +73,15 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CheckBox
+import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.ui.text.style.TextDecoration
 import com.example.data.AutoAnalyzeMode
+import com.example.data.CallerActionItem
+import com.example.data.CallerProfile
 import com.example.data.CommitmentExtractor
 import com.example.data.CallMetadataParser
 import com.example.ui.ChatMessage
@@ -146,6 +152,10 @@ fun CallScribeApp(viewModel: CallViewModel) {
     val autoSyncEnabled by viewModel.autoSyncEnabled.collectAsStateWithLifecycle()
     val commitmentRemindersEnabled by viewModel.commitmentRemindersEnabled.collectAsStateWithLifecycle()
     val completedActionItemKeys by viewModel.completedActionItemKeys.collectAsStateWithLifecycle()
+
+    val callerProfiles by viewModel.callerProfiles.collectAsStateWithLifecycle()
+    val selectedCallerProfile by viewModel.selectedCallerProfile.collectAsStateWithLifecycle()
+    var currentTab by remember { mutableIntStateOf(0) }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -983,6 +993,33 @@ fun CallScribeApp(viewModel: CallViewModel) {
         )
     }
 
+    // Caller Profile Detail Dialog
+    if (selectedCallerProfile != null) {
+        val profile = selectedCallerProfile!!
+        CallerProfileDialog(
+            profile = profile,
+            onDismiss = { viewModel.closeCallerProfile() },
+            onToggleAutoAnalyze = {
+                viewModel.toggleCallerAutoAnalyze(profile.displayName)
+            },
+            onToggleActionItem = { recId, text ->
+                viewModel.toggleActionItem(recId, text)
+            },
+            onPlayAudio = { rec ->
+                viewModel.toggleAudioPlay(context, rec)
+            },
+            onChat = { rec ->
+                viewModel.closeCallerProfile()
+                viewModel.openChat(rec)
+            },
+            onAddToCalendar = { rec ->
+                viewModel.syncToCalendar(context, rec)
+            },
+            playingRecordingId = playingRecordingId,
+            isPlaying = isPlaying
+        )
+    }
+
     if (updateInfo != null) {
         val info = updateInfo!!
         AlertDialog(
@@ -1194,42 +1231,69 @@ fun CallScribeApp(viewModel: CallViewModel) {
                 .padding(innerPadding)
                 .imePadding()
         ) {
-            // Dashboard info
-            if (recordings.isNotEmpty() || searchQuery.isNotEmpty()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 20.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+            // ── NeoBrutalist Tab Bar: All Calls vs Caller Profiles ──────────────
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Tab 0: Calls
+                Button(
+                    onClick = { currentTab = 0 },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (currentTab == 0) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
+                    ),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(if (currentTab == 0) 3.dp else 1.5.dp, Color.Black)
                 ) {
-                    Text(
-                        text = if (searchQuery.isBlank()) "Analyzed Calls" else "Search Results",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Black,
-                        color = Color.Black
+                    Icon(
+                        imageVector = Icons.Default.Phone,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = Color.Black
                     )
-                    Box(
-                        modifier = Modifier
-                            .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(12.dp))
-                            .border(2.dp, Color.Black, RoundedCornerShape(12.dp))
-                            .padding(horizontal = 12.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            text = "${recordings.size}",
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Black,
-                            color = Color.Black
-                        )
-                    }
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "Calls (${recordings.size})",
+                        fontWeight = if (currentTab == 0) FontWeight.Black else FontWeight.Bold,
+                        color = Color.Black,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+
+                // Tab 1: Caller Profiles
+                Button(
+                    onClick = { currentTab = 1 },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (currentTab == 1) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface
+                    ),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(if (currentTab == 1) 3.dp else 1.5.dp, Color.Black)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Person,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = Color.Black
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "Callers (${callerProfiles.size})",
+                        fontWeight = if (currentTab == 1) FontWeight.Black else FontWeight.Bold,
+                        color = Color.Black,
+                        style = MaterialTheme.typography.labelMedium
+                    )
                 }
             }
-            
+
             // Search Bar Component
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .padding(horizontal = 16.dp, vertical = 6.dp)
             ) {
                 // Shadow
                 Box(
@@ -1245,7 +1309,13 @@ fun CallScribeApp(viewModel: CallViewModel) {
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(12.dp)),
-                    placeholder = { Text("Search calls, summaries, topics...", fontWeight = FontWeight.Bold, color = Color.DarkGray) },
+                    placeholder = {
+                        Text(
+                            text = if (currentTab == 0) "Search calls, summaries, topics..." else "Search callers, contacts, tasks...",
+                            fontWeight = FontWeight.Bold,
+                            color = Color.DarkGray
+                        )
+                    },
                     leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = Color.Black) },
                     trailingIcon = {
                         if (searchQuery.isNotEmpty()) {
@@ -1268,173 +1338,306 @@ fun CallScribeApp(viewModel: CallViewModel) {
                 )
             }
 
-            AnimatedVisibility(visible = isSyncing) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .matchParentSize()
-                            .offset(x = 4.dp, y = 4.dp)
-                            .background(Color.Black, RoundedCornerShape(16.dp))
-                    )
-                    Card(
+            if (currentTab == 0) {
+                // ── TAB 0: ALL CALLS TIMELINE ─────────────────────────────────
+                if (recordings.isNotEmpty() || searchQuery.isNotEmpty()) {
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .border(3.dp, Color.Black, RoundedCornerShape(16.dp)),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer), // Cyan
-                        shape = RoundedCornerShape(16.dp)
+                            .padding(horizontal = 20.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "Syncing & Analyzing...",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Black,
-                                    color = Color.Black
-                                )
-                                Button(
-                                    onClick = { viewModel.cancelSync() },
-                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
-                                    shape = RoundedCornerShape(8.dp),
-                                    border = BorderStroke(2.dp, Color.Black),
-                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-                                ) {
-                                    Icon(Icons.Default.Stop, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color.Black)
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Stop", fontWeight = FontWeight.Black, color = Color.Black, style = MaterialTheme.typography.labelMedium)
-                                }
-                            }
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = syncStatus,
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.Black
-                            )
-                            if (syncTotalCount > 0) {
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = "Analyzed: $syncProcessedCount / $syncTotalCount" + if (syncErrorCount > 0) " (${syncErrorCount} failed)" else "",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color.DarkGray
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(12.dp))
-                            LinearProgressIndicator(
-                                progress = { if (syncTotalCount > 0) syncProgress else 0f },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(10.dp)
-                                    .border(2.dp, Color.Black),
-                                color = MaterialTheme.colorScheme.secondary,
-                                trackColor = Color.White
-                            )
-                        }
-                    }
-                }
-            }
-            
-            if (!isSyncing && recordings.isEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(32.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier
-                            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(24.dp))
-                            .border(3.dp, Color.Black, RoundedCornerShape(24.dp))
-                            .padding(32.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.FolderOpen,
-                            contentDescription = null,
-                            tint = Color.Black,
-                            modifier = Modifier.size(64.dp)
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
                         Text(
-                            text = if (searchQuery.isBlank()) "No Calls Found" else "No Matching Calls",
-                            style = MaterialTheme.typography.titleLarge,
+                            text = if (searchQuery.isBlank()) "Analyzed Calls" else "Search Results",
+                            style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Black,
                             color = Color.Black
                         )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = if (searchQuery.isBlank())
-                                "Tap the green folder button to select a directory with call recordings (.mp3, .m4a, .wav) to analyze."
-                            else
-                                "No transcripts or summaries matched '$searchQuery'. Try another query.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.DarkGray,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        Box(
+                            modifier = Modifier
+                                .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(12.dp))
+                                .border(2.dp, Color.Black, RoundedCornerShape(12.dp))
+                                .padding(horizontal = 12.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = "${recordings.size}",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Black,
+                                color = Color.Black
+                            )
+                        }
+                    }
+                }
+
+                AnimatedVisibility(visible = isSyncing) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .matchParentSize()
+                                .offset(x = 4.dp, y = 4.dp)
+                                .background(Color.Black, RoundedCornerShape(16.dp))
+                        )
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .border(3.dp, Color.Black, RoundedCornerShape(16.dp)),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+                            shape = RoundedCornerShape(16.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Syncing & Analyzing...",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Black,
+                                        color = Color.Black
+                                    )
+                                    Button(
+                                        onClick = { viewModel.cancelSync() },
+                                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
+                                        shape = RoundedCornerShape(8.dp),
+                                        border = BorderStroke(2.dp, Color.Black),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                    ) {
+                                        Icon(Icons.Default.Stop, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color.Black)
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Stop", fontWeight = FontWeight.Black, color = Color.Black, style = MaterialTheme.typography.labelMedium)
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = syncStatus,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.Black
+                                )
+                                if (syncTotalCount > 0) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "Analyzed: $syncProcessedCount / $syncTotalCount" + if (syncErrorCount > 0) " (${syncErrorCount} failed)" else "",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.DarkGray
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(12.dp))
+                                LinearProgressIndicator(
+                                    progress = { if (syncTotalCount > 0) syncProgress else 0f },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(10.dp)
+                                        .border(2.dp, Color.Black),
+                                    color = MaterialTheme.colorScheme.secondary,
+                                    trackColor = Color.White
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (!isSyncing && recordings.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(24.dp))
+                                .border(3.dp, Color.Black, RoundedCornerShape(24.dp))
+                                .padding(32.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.FolderOpen,
+                                contentDescription = null,
+                                tint = Color.Black,
+                                modifier = Modifier.size(64.dp)
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = if (searchQuery.isBlank()) "No Calls Found" else "No Matching Calls",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Black,
+                                color = Color.Black
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = if (searchQuery.isBlank())
+                                    "Tap the green folder button to select a directory with call recordings (.mp3, .m4a, .wav) to analyze."
+                                else
+                                    "No transcripts or summaries matched '$searchQuery'. Try another query.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.DarkGray,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                        }
+                    }
+                }
+
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(bottom = 88.dp)
+                ) {
+                    items(recordings, key = { it.id }) { recording ->
+                        RecordingCard(
+                            recording = recording,
+                            isCurrentlyPlaying = playingRecordingId == recording.id && isPlaying,
+                            isAudioLoaded = playingRecordingId == recording.id,
+                            currentPositionMs = if (playingRecordingId == recording.id) currentPositionMs else 0,
+                            durationMs = if (playingRecordingId == recording.id) durationMs else 0,
+                            onTogglePlay = { viewModel.toggleAudioPlay(context, recording) },
+                            onSeek = { pos -> viewModel.seekAudio(pos) },
+                            onChat = { viewModel.openChat(recording) },
+                            onDelete = { recordingToDelete = recording },
+                            onAddToCalendar = { viewModel.syncToCalendar(context, recording) },
+                            onShare = {
+                                try {
+                                    val sendIntent: Intent = Intent().apply {
+                                        action = Intent.ACTION_SEND
+                                        putExtra(
+                                            Intent.EXTRA_TEXT,
+                                            "📋 Call Summary for ${CallMetadataParser.cleanCallTitle(recording.title)}:\n\n${recording.decodedSummary}\n\n--- Transcription ---\n${recording.decodedTranscription}"
+                                        )
+                                        type = "text/plain"
+                                    }
+                                    val shareIntent = Intent.createChooser(sendIntent, "Share Call Summary")
+                                    shareIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    context.startActivity(shareIntent)
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "Cannot open sharing dialog.", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            onCopySummary = {
+                                clipboard.setText(AnnotatedString(recording.decodedSummary))
+                                Toast.makeText(context, "Summary copied!", Toast.LENGTH_SHORT).show()
+                            },
+                            onCopyTranscript = {
+                                clipboard.setText(AnnotatedString(recording.decodedTranscription))
+                                Toast.makeText(context, "Transcript copied!", Toast.LENGTH_SHORT).show()
+                            },
+                            onReanalyze = {
+                                viewModel.reanalyzeRecording(context, recording)
+                            },
+                            onToggleActionItem = { itemText ->
+                                viewModel.toggleActionItem(recording.id, itemText)
+                            },
+                            isActionItemCompleted = { itemText ->
+                                viewModel.isActionItemCompleted(recording.id, itemText)
+                            },
+                            onOpenCallerProfile = {
+                                viewModel.openCallerProfileForRecording(recording)
+                            }
                         )
                     }
                 }
-            }
+            } else {
+                // ── TAB 1: CALLER PROFILES (ORGANIZED BY CONTACT) ─────────────
+                val filteredProfiles = remember(callerProfiles, searchQuery) {
+                    val q = searchQuery.trim().lowercase()
+                    if (q.isBlank()) callerProfiles
+                    else callerProfiles.filter { cp ->
+                        cp.displayName.lowercase().contains(q) ||
+                        (cp.phoneNumber?.contains(q) == true) ||
+                        cp.actionItems.any { it.text.lowercase().contains(q) } ||
+                        cp.recordings.any { it.title.lowercase().contains(q) || it.decodedSummary.lowercase().contains(q) }
+                    }
+                }
 
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = 88.dp)
-            ) {
-                items(recordings, key = { it.id }) { recording ->
-                    RecordingCard(
-                        recording = recording,
-                        isCurrentlyPlaying = playingRecordingId == recording.id && isPlaying,
-                        isAudioLoaded = playingRecordingId == recording.id,
-                        currentPositionMs = if (playingRecordingId == recording.id) currentPositionMs else 0,
-                        durationMs = if (playingRecordingId == recording.id) durationMs else 0,
-                        onTogglePlay = { viewModel.toggleAudioPlay(context, recording) },
-                        onSeek = { pos -> viewModel.seekAudio(pos) },
-                        onChat = { viewModel.openChat(recording) },
-                        onDelete = { recordingToDelete = recording },
-                        onAddToCalendar = { viewModel.syncToCalendar(context, recording) },
-                        onShare = {
-                            try {
-                                val sendIntent: Intent = Intent().apply {
-                                    action = Intent.ACTION_SEND
-                                    putExtra(
-                                        Intent.EXTRA_TEXT,
-                                        "📋 Call Summary for ${CallMetadataParser.cleanCallTitle(recording.title)}:\n\n${recording.decodedSummary}\n\n--- Transcription ---\n${recording.decodedTranscription}"
-                                    )
-                                    type = "text/plain"
-                                }
-                                val shareIntent = Intent.createChooser(sendIntent, "Share Call Summary")
-                                shareIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                context.startActivity(shareIntent)
-                            } catch (e: Exception) {
-                                Toast.makeText(context, "Cannot open sharing dialog.", Toast.LENGTH_SHORT).show()
-                            }
-                        },
-                        onCopySummary = {
-                            clipboard.setText(AnnotatedString(recording.decodedSummary))
-                            Toast.makeText(context, "Summary copied!", Toast.LENGTH_SHORT).show()
-                        },
-                        onCopyTranscript = {
-                            clipboard.setText(AnnotatedString(recording.decodedTranscription))
-                            Toast.makeText(context, "Transcript copied!", Toast.LENGTH_SHORT).show()
-                        },
-                        onReanalyze = {
-                            viewModel.reanalyzeRecording(context, recording)
-                        },
-                        onToggleActionItem = { itemText ->
-                            viewModel.toggleActionItem(recording.id, itemText)
-                        },
-                        isActionItemCompleted = { itemText ->
-                            viewModel.isActionItemCompleted(recording.id, itemText)
+                if (filteredProfiles.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (searchQuery.isBlank()) "Caller Profiles" else "Matching Callers",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Black,
+                            color = Color.Black
+                        )
+                        Box(
+                            modifier = Modifier
+                                .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(12.dp))
+                                .border(2.dp, Color.Black, RoundedCornerShape(12.dp))
+                                .padding(horizontal = 12.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = "${filteredProfiles.size}",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Black,
+                                color = Color.Black
+                            )
                         }
-                    )
+                    }
+                }
+
+                if (filteredProfiles.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(24.dp))
+                                .border(3.dp, Color.Black, RoundedCornerShape(24.dp))
+                                .padding(32.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Person,
+                                contentDescription = null,
+                                tint = Color.Black,
+                                modifier = Modifier.size(64.dp)
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = if (searchQuery.isBlank()) "No Callers Yet" else "No Matching Callers",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Black,
+                                color = Color.Black
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = if (searchQuery.isBlank())
+                                    "When call recordings are added and analyzed, every caller will be automatically organized here with their commitments, deadlines, and call history!"
+                                else
+                                    "No caller or commitments matched '$searchQuery'. Try another search.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.DarkGray,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(bottom = 88.dp)
+                    ) {
+                        items(filteredProfiles, key = { it.callerKey }) { profile ->
+                            CallerProfileCard(
+                                profile = profile,
+                                onClick = { viewModel.openCallerProfile(profile.callerKey) },
+                                onToggleAutoAnalyze = { viewModel.toggleCallerAutoAnalyze(profile.displayName) }
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1458,7 +1661,8 @@ fun RecordingCard(
     onCopyTranscript: () -> Unit,
     onReanalyze: () -> Unit = {},
     onToggleActionItem: (String) -> Unit = {},
-    isActionItemCompleted: (String) -> Boolean = { false }
+    isActionItemCompleted: (String) -> Boolean = { false },
+    onOpenCallerProfile: (() -> Unit)? = null
 ) {
     var expanded by remember { mutableStateOf(false) }
     val dateFormat = remember { SimpleDateFormat("MMM dd, yyyy - HH:mm", Locale.getDefault()) }
@@ -1494,7 +1698,12 @@ fun RecordingCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 8.dp)
+                            .clickable { onOpenCallerProfile?.invoke() }
+                    ) {
                         Text(
                             text = metadata.cleanTitle.ifBlank { recording.title },
                             style = MaterialTheme.typography.titleMedium,
@@ -1522,6 +1731,19 @@ fun RecordingCard(
                         }
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Caller Profile button
+                        if (onOpenCallerProfile != null) {
+                            IconButton(
+                                onClick = onOpenCallerProfile,
+                                modifier = Modifier
+                                    .background(MaterialTheme.colorScheme.primary, CircleShape)
+                                    .border(2.dp, Color.Black, CircleShape)
+                                    .size(36.dp)
+                            ) {
+                                Icon(Icons.Default.Person, contentDescription = "Caller Profile", tint = Color.Black, modifier = Modifier.size(18.dp))
+                            }
+                            Spacer(modifier = Modifier.width(4.dp))
+                        }
                         // Chat button
                         IconButton(
                             onClick = onChat,
@@ -1842,4 +2064,459 @@ fun RecordingCard(
             }
         }
     }
+}
+
+@Composable
+fun CallerProfileCard(
+    profile: CallerProfile,
+    onClick: () -> Unit,
+    onToggleAutoAnalyze: () -> Unit
+) {
+    val dateFormat = remember { SimpleDateFormat("MMM dd, yyyy", Locale.getDefault()) }
+    val initial = profile.displayName.firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()?.toString() ?: "👤"
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .clickable(onClick = onClick)
+    ) {
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .offset(x = 4.dp, y = 4.dp)
+                .background(Color.Black, RoundedCornerShape(16.dp))
+        )
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(2.5.dp, Color.Black, RoundedCornerShape(16.dp)),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Avatar Circle
+                    Box(
+                        modifier = Modifier
+                            .size(46.dp)
+                            .background(
+                                if (profile.pendingActionItemsCount > 0) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.primary,
+                                CircleShape
+                            )
+                            .border(2.dp, Color.Black, CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = initial,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Black,
+                            color = Color.Black
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = profile.displayName,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Black,
+                                color = Color.Black,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (profile.isAutoAnalyzeTarget) {
+                                Box(
+                                    modifier = Modifier
+                                        .background(Color(0xFFDCFCE7), RoundedCornerShape(6.dp))
+                                        .border(1.dp, Color(0xFF15803D), RoundedCornerShape(6.dp))
+                                        .padding(horizontal = 6.dp, vertical = 1.dp)
+                                ) {
+                                    Text(
+                                        text = "VIP",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Black,
+                                        color = Color(0xFF15803D)
+                                    )
+                                }
+                            }
+                        }
+                        if (!profile.phoneNumber.isNullOrBlank() && profile.phoneNumber != profile.displayName) {
+                            Text(
+                                text = profile.phoneNumber,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.DarkGray,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Text(
+                            text = "${profile.totalCalls} call(s) • ${profile.incomingCount} ↙ in, ${profile.outgoingCount} ↗ out",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.DarkGray,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                    IconButton(
+                        onClick = onClick,
+                        modifier = Modifier
+                            .background(Color(0xFFF3F4F6), CircleShape)
+                            .border(1.5.dp, Color.Black, CircleShape)
+                            .size(32.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Visibility,
+                            contentDescription = "View Profile",
+                            tint = Color.Black,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+
+                // Pending commitments badge if any
+                if (profile.pendingActionItemsCount > 0) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFFFEF3C7), RoundedCornerShape(8.dp))
+                            .border(1.5.dp, Color.Black, RoundedCornerShape(8.dp))
+                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                            Text("⚡", style = MaterialTheme.typography.labelSmall)
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = "${profile.pendingActionItemsCount} commitment(s) pending",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Black,
+                                color = Color.Black
+                            )
+                        }
+                        Text(
+                            text = "View →",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Black,
+                            color = Color(0xFFB45309)
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Latest: ${dateFormat.format(Date(profile.latestCallTimestamp))}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.Gray,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "View Profile & History →",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.Black,
+                        fontWeight = FontWeight.Black
+                    )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CallerProfileDialog(
+    profile: CallerProfile,
+    onDismiss: () -> Unit,
+    onToggleAutoAnalyze: () -> Unit,
+    onToggleActionItem: (Int, String) -> Unit,
+    onPlayAudio: (Recording) -> Unit,
+    onChat: (Recording) -> Unit,
+    onAddToCalendar: (Recording) -> Unit,
+    playingRecordingId: Int?,
+    isPlaying: Boolean
+) {
+    val dateFormat = remember { SimpleDateFormat("MMM dd, yyyy - HH:mm", Locale.getDefault()) }
+    val initial = profile.displayName.firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()?.toString() ?: "👤"
+    var selectedSection by remember { mutableIntStateOf(0) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .background(MaterialTheme.colorScheme.primaryContainer, CircleShape)
+                                .border(2.dp, Color.Black, CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(initial, fontWeight = FontWeight.Black, style = MaterialTheme.typography.titleMedium, color = Color.Black)
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = profile.displayName,
+                                fontWeight = FontWeight.Black,
+                                style = MaterialTheme.typography.titleMedium,
+                                color = Color.Black,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (!profile.phoneNumber.isNullOrBlank() && profile.phoneNumber != profile.displayName) {
+                                Text(
+                                    text = profile.phoneNumber,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color.DarkGray,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                    IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
+                        Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.Black)
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = onToggleAutoAnalyze,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (profile.isAutoAnalyzeTarget) Color(0xFFDCFCE7) else MaterialTheme.colorScheme.surface
+                    ),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(2.dp, if (profile.isAutoAnalyzeTarget) Color(0xFF15803D) else Color.Black),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                ) {
+                    Icon(
+                        imageVector = if (profile.isAutoAnalyzeTarget) Icons.Default.CheckCircle else Icons.Default.Add,
+                        contentDescription = null,
+                        tint = if (profile.isAutoAnalyzeTarget) Color(0xFF15803D) else Color.Black,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = if (profile.isAutoAnalyzeTarget) "VIP: Auto-Analyze Calls Enabled" else "⭐ Enable VIP Auto-Analyze for this Caller",
+                        fontWeight = FontWeight.Black,
+                        color = if (profile.isAutoAnalyzeTarget) Color(0xFF15803D) else Color.Black,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFFF3F4F6), RoundedCornerShape(8.dp))
+                        .border(1.5.dp, Color.Black, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceAround
+                ) {
+                    Text("📞 ${profile.totalCalls} Calls", fontWeight = FontWeight.Black, style = MaterialTheme.typography.labelSmall, color = Color.Black)
+                    Text("↙ ${profile.incomingCount} In", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelSmall, color = Color(0xFF15803D))
+                    Text("↗ ${profile.outgoingCount} Out", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelSmall, color = Color(0xFFB45309))
+                    Text("✅ ${profile.actionItems.count { it.isCompleted }}/${profile.actionItems.size} Done", fontWeight = FontWeight.Black, style = MaterialTheme.typography.labelSmall, color = Color.Black)
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    FilterChip(
+                        selected = selectedSection == 0,
+                        onClick = { selectedSection = 0 },
+                        label = { Text("Tasks (${profile.actionItems.size})", fontWeight = FontWeight.Black, style = MaterialTheme.typography.labelSmall) },
+                        modifier = Modifier.weight(1f),
+                        border = BorderStroke(1.5.dp, Color.Black)
+                    )
+                    FilterChip(
+                        selected = selectedSection == 1,
+                        onClick = { selectedSection = 1 },
+                        label = { Text("History (${profile.recordings.size})", fontWeight = FontWeight.Black, style = MaterialTheme.typography.labelSmall) },
+                        modifier = Modifier.weight(1f),
+                        border = BorderStroke(1.5.dp, Color.Black)
+                    )
+                    FilterChip(
+                        selected = selectedSection == 2,
+                        onClick = { selectedSection = 2 },
+                        label = { Text("Dates (${profile.datesAndDeadlines.size})", fontWeight = FontWeight.Black, style = MaterialTheme.typography.labelSmall) },
+                        modifier = Modifier.weight(1f),
+                        border = BorderStroke(1.5.dp, Color.Black)
+                    )
+                }
+            }
+        },
+        text = {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 200.dp, max = 380.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                when (selectedSection) {
+                    0 -> {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            if (profile.actionItems.isEmpty()) {
+                                Text(
+                                    text = "No action items or commitments found in calls with this person.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.DarkGray,
+                                    modifier = Modifier.padding(vertical = 16.dp)
+                                )
+                            } else {
+                                profile.actionItems.forEach { item ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 4.dp)
+                                            .background(
+                                                if (item.isCompleted) Color(0xFFF0FDF4) else Color(0xFFFFFBEB),
+                                                RoundedCornerShape(8.dp)
+                                            )
+                                            .border(1.5.dp, if (item.isCompleted) Color(0xFF86EFAC) else Color(0xFFFDE68A), RoundedCornerShape(8.dp))
+                                            .clickable { onToggleActionItem(item.recordingId, item.text) }
+                                            .padding(8.dp),
+                                        verticalAlignment = Alignment.Top
+                                    ) {
+                                        Checkbox(
+                                            checked = item.isCompleted,
+                                            onCheckedChange = { onToggleActionItem(item.recordingId, item.text) },
+                                            modifier = Modifier.size(24.dp).padding(end = 6.dp)
+                                        )
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = item.text,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (item.isCompleted) Color.Gray else Color.Black,
+                                                textDecoration = if (item.isCompleted) TextDecoration.LineThrough else TextDecoration.None
+                                            )
+                                            Text(
+                                                text = "From: ${item.callTitle} • ${dateFormat.format(Date(item.callTimestamp))}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = Color.Gray,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    1 -> {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            profile.recordings.forEach { rec ->
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp)
+                                        .border(1.5.dp, Color.Black, RoundedCornerShape(10.dp)),
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Column(modifier = Modifier.padding(10.dp)) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = dateFormat.format(Date(rec.timestamp)),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.Black,
+                                                color = Color.Black
+                                            )
+                                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                IconButton(onClick = { onPlayAudio(rec) }, modifier = Modifier.size(28.dp)) {
+                                                    val isThisPlaying = playingRecordingId == rec.id && isPlaying
+                                                    Icon(if (isThisPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, null, modifier = Modifier.size(16.dp))
+                                                }
+                                                IconButton(onClick = { onChat(rec) }, modifier = Modifier.size(28.dp)) {
+                                                    Icon(Icons.AutoMirrored.Filled.Chat, null, modifier = Modifier.size(16.dp))
+                                                }
+                                                IconButton(onClick = { onAddToCalendar(rec) }, modifier = Modifier.size(28.dp)) {
+                                                    Icon(Icons.Default.CalendarToday, null, modifier = Modifier.size(16.dp))
+                                                }
+                                            }
+                                        }
+                                        Spacer(Modifier.height(4.dp))
+                                        Text(
+                                            text = rec.decodedSummary.lines().firstOrNull { it.isNotBlank() && !it.startsWith("#") } ?: rec.decodedSummary.take(120),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = Color.DarkGray,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    2 -> {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            if (profile.datesAndDeadlines.isEmpty()) {
+                                Text(
+                                    text = "No dates or deadlines scheduled with this contact.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.DarkGray,
+                                    modifier = Modifier.padding(vertical = 16.dp)
+                                )
+                            } else {
+                                profile.datesAndDeadlines.forEach { dateStr ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 3.dp)
+                                            .background(Color(0xFFEFF6FF), RoundedCornerShape(8.dp))
+                                            .border(1.5.dp, Color(0xFF93C5FD), RoundedCornerShape(8.dp))
+                                            .padding(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text("📅", style = MaterialTheme.typography.labelMedium)
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            text = dateStr,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFF1E3A8A)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onDismiss,
+                shape = RoundedCornerShape(8.dp),
+                border = BorderStroke(2.dp, Color.Black),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+            ) {
+                Text("Close", fontWeight = FontWeight.Black, color = Color.Black)
+            }
+        },
+        shape = RoundedCornerShape(16.dp),
+        containerColor = MaterialTheme.colorScheme.surface,
+        modifier = Modifier.border(3.dp, Color.Black, RoundedCornerShape(16.dp))
+    )
 }

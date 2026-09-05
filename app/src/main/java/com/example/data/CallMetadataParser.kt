@@ -17,8 +17,8 @@ enum class CallDirection {
 
 object CallMetadataParser {
 
-    // Matches phone numbers: optional country code, optional groupings
-    private val phoneRegex = Regex("""(?:\+?\d{1,3}[\-.\s]?)?\(?\d{2,4}\)?[\-.\s]?\d{3,4}[\-.\s]?\d{3,4}""")
+    // Matches phone numbers: optional country code, optional groupings (7 to 20 chars)
+    private val phoneRegex = Regex("""\+?[0-9][0-9\s\-()]{5,18}[0-9]""")
 
     // Prefixes to strip (case-insensitive)
     private val prefixRegex = Regex("""(?i)^(call[_\s\-]*recording|call|recording|rec|audio|voice)[\s_\-]*""")
@@ -26,8 +26,8 @@ object CallMetadataParser {
     // Direction markers to strip
     private val directionRegex = Regex("""(?i)[\s_\-]*(incoming|outgoing|in|out)[\s_\-]*""")
 
-    // Date-time stamps like 260307_125256 or 20240307_125256 or 20240307
-    private val dateTimeRegex = Regex("""\d{6,8}[_\-]\d{4,6}|\b(19|20)\d{6}\b""")
+    // Date-time stamps like 260307_125256 or 20240307_125256 or 20240307 (handles underscores/separators properly)
+    private val dateTimeRegex = Regex("""(?<=[^0-9]|^)(?:\d{6,8}[_\-]\d{4,6}|(?:19|20)\d{6})(?=[^0-9]|$)""")
 
     // Remaining separators
     private val separatorRegex = Regex("""[\s_\-]+""")
@@ -42,9 +42,16 @@ object CallMetadataParser {
             else -> CallDirection.UNKNOWN
         }
 
-        // Try extracting phone number
+        // Strip date-times first so date digits (e.g. 20240307 or 125256) are not misidentified as phone numbers
+        val nameWithoutDate = try {
+            baseName.replace(dateTimeRegex, "")
+        } catch (_: Exception) {
+            baseName
+        }
+
+        // Try extracting phone number from nameWithoutDate
         val phoneNumber = try {
-            phoneRegex.find(baseName)?.value?.trim()
+            phoneRegex.find(nameWithoutDate)?.value?.trim()
         } catch (_: Exception) {
             null
         }

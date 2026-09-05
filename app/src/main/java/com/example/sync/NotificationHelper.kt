@@ -92,15 +92,18 @@ object NotificationHelper {
                     append(" • $date\n")
                 }
             }
-        }.trimEnd()
+        }
+        val safeBigText = bigText.take(4000)
 
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
 
+        val notifId = (2000 + (recordingId % 100000)).coerceAtLeast(1)
+
         val pendingIntent = PendingIntent.getActivity(
             context,
-            recordingId,
+            notifId,
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
@@ -112,14 +115,14 @@ object NotificationHelper {
             .setSmallIcon(iconRes)
             .setContentTitle(title)
             .setContentText(summaryText)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(safeBigText))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
             .build()
 
         try {
-            NotificationManagerCompat.from(context).notify(2000 + recordingId, notification)
+            NotificationManagerCompat.from(context).notify(notifId, notification)
         } catch (_: SecurityException) {
         } catch (_: Exception) {
         }
@@ -147,13 +150,15 @@ object NotificationHelper {
         val title = if (isAutoAnalyzed) "⚡ Call Analyzed: $cleanTitle" else "📞 New Call: $cleanTitle"
         val text = if (isAutoAnalyzed) "Full transcription and AI insights are ready." else "New call recording detected. Tap to analyze."
 
+        val notifId = (1000 + (recordingId % 100000)).coerceAtLeast(1)
+
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
 
         val pendingIntent = PendingIntent.getActivity(
             context,
-            recordingId,
+            notifId,
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
@@ -171,7 +176,7 @@ object NotificationHelper {
             .build()
 
         try {
-            NotificationManagerCompat.from(context).notify(1000 + recordingId, notification)
+            NotificationManagerCompat.from(context).notify(notifId, notification)
         } catch (_: SecurityException) {
         } catch (_: Exception) {
         }
