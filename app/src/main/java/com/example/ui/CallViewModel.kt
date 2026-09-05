@@ -37,6 +37,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 
+import com.example.data.AutoAnalyzeMode
+import com.example.data.CallPreferencesManager
+import com.example.data.CommitmentExtractor
+import com.example.sync.CallSyncWorker
+import com.example.sync.NotificationHelper
+
 enum class MessageSender { USER, AI }
 
 data class ChatMessage(
@@ -50,7 +56,8 @@ class CallViewModel(
     private val geminiRepository: GeminiRepository,
     private val gitHubUpdateRepository: GitHubUpdateRepository = GitHubUpdateRepository(),
     private val apiKeyManager: ApiKeyManager? = null,
-    private val nvidiaRepository: NvidiaRepository? = null
+    private val nvidiaRepository: NvidiaRepository? = null,
+    private val preferencesManager: CallPreferencesManager? = null
 ) : ViewModel() {
 
     val searchQuery = MutableStateFlow("")
@@ -62,9 +69,17 @@ class CallViewModel(
     val syncErrorCount = MutableStateFlow(0)
 
     val showApiKeyDialog = MutableStateFlow(false)
+    val showRulesDialog = MutableStateFlow(false)
     val selectedFolderForLimit = MutableStateFlow<Uri?>(null)
     val folderTotalRecordings = MutableStateFlow(0)
     val folderPendingRecordings = MutableStateFlow(0)
+
+    // Auto-Analyze & Sync Rule States
+    val autoAnalyzeMode = MutableStateFlow(preferencesManager?.getAutoAnalyzeMode() ?: AutoAnalyzeMode.UNKNOWN_ONLY)
+    val autoAnalyzeTargets = MutableStateFlow(preferencesManager?.getAutoAnalyzeTargets() ?: emptySet())
+    val autoSyncEnabled = MutableStateFlow(preferencesManager?.isAutoSyncEnabled() ?: true)
+    val commitmentRemindersEnabled = MutableStateFlow(preferencesManager?.isCommitmentRemindersEnabled() ?: true)
+    val completedActionItemKeys = MutableStateFlow<Set<String>>(emptySet())
 
     val updateInfo = MutableStateFlow<AppUpdateInfo?>(null)
     val isCheckingUpdate = MutableStateFlow(false)
@@ -132,6 +147,57 @@ class CallViewModel(
 
     fun dismissLimitDialog() {
         selectedFolderForLimit.value = null
+    }
+
+    fun dismissRulesDialog() {
+        showRulesDialog.value = false
+    }
+
+    // --- Auto-Analyze Rules & Preferences ---
+    fun setAutoAnalyzeMode(mode: AutoAnalyzeMode) {
+        preferencesManager?.setAutoAnalyzeMode(mode)
+        autoAnalyzeMode.value = mode
+    }
+
+    fun addAutoAnalyzeTarget(target: String) {
+        preferencesManager?.addAutoAnalyzeTarget(target)
+        autoAnalyzeTargets.value = preferencesManager?.getAutoAnalyzeTargets() ?: emptySet()
+    }
+
+    fun removeAutoAnalyzeTarget(target: String) {
+        preferencesManager?.removeAutoAnalyzeTarget(target)
+        autoAnalyzeTargets.value = preferencesManager?.getAutoAnalyzeTargets() ?: emptySet()
+    }
+
+    fun setAutoSyncEnabled(context: Context, enabled: Boolean) {
+        preferencesManager?.setAutoSyncEnabled(enabled)
+        autoSyncEnabled.value = enabled
+        if (enabled) {
+            CallSyncWorker.schedulePeriodicSync(context)
+        } else {
+            CallSyncWorker.cancelPeriodicSync(context)
+        }
+    }
+
+    fun setCommitmentRemindersEnabled(enabled: Boolean) {
+        preferencesManager?.setCommitmentRemindersEnabled(enabled)
+        commitmentRemindersEnabled.value = enabled
+    }
+
+    fun isActionItemCompleted(recordingId: Int, itemText: String): Boolean {
+        val key = "${recordingId}_${itemText.hashCode()}"
+        return completedActionItemKeys.value.contains(key) ||
+            (preferencesManager?.isActionItemCompleted(recordingId, itemText) == true)
+    }
+
+    fun toggleActionItem(recordingId: Int, itemText: String) {
+        val currentlyCompleted = isActionItemCompleted(recordingId, itemText)
+        val newStatus = !currentlyCompleted
+        preferencesManager?.setActionItemCompleted(recordingId, itemText, newStatus)
+        val key = "${recordingId}_${itemText.hashCode()}"
+        val updated = completedActionItemKeys.value.toMutableSet()
+        if (newStatus) updated.add(key) else updated.remove(key)
+        completedActionItemKeys.value = updated
     }
 
     // --- Chat With Call Methods ---
@@ -375,6 +441,10 @@ class CallViewModel(
     fun onFolderSelected(context: Context, treeUri: Uri) {
         if (isSyncing.value) return
 
+        // Persist folder URI for background sync & auto-detection
+        preferencesManager?.setPersistedFolderUri(treeUri.toString())
+        CallSyncWorker.schedulePeriodicSync(context)
+
         if (!isApiKeyConfigured()) {
             updateStatusMessage.value = "On-Device Local AI Mode (Zero API Key required)."
         }
@@ -426,6 +496,72 @@ class CallViewModel(
                     syncStatus.value = "Scan failed: ${t.localizedMessage ?: t.javaClass.simpleName}"
                     isSyncing.value = false
                 }
+            }
+        }
+    }
+
+    /** Automatically scans persisted folder for new recordings when app starts or resumes */
+    fun checkForNewRecordingsOnResume(context: Context) {
+        val folderUriStr = preferencesManager?.getPersistedFolderUri() ?: return
+        val treeUri = try { Uri.parse(folderUriStr) } catch (_: Exception) { return }
+        val appContext = context.applicationContext
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val audioFiles = mutableListOf<AudioFileInfo>()
+                val treeDocId = try {
+                    DocumentsContract.getTreeDocumentId(treeUri)
+                } catch (_: Exception) {
+                    DocumentsContract.getDocumentId(treeUri)
+                }
+
+                scanDirectoryRecursively(appContext, treeUri, treeDocId, audioFiles, currentDepth = 0, maxDepth = 3)
+
+                var newDetected = 0
+                for (file in audioFiles) {
+                    val existing = repository.getByUri(file.uri.toString())
+                    if (existing == null) {
+                        val placeholder = Recording(
+                            id = 0,
+                            title = file.name,
+                            contentEncrypted = SimpleEncryption.encrypt(""),
+                            summaryEncrypted = SimpleEncryption.encrypt("Pending AI Analysis\n\nTap ⚡ Transcribe & Analyze Call to view insights."),
+                            timestamp = if (file.lastModified > 0) file.lastModified else System.currentTimeMillis(),
+                            sourceUri = file.uri.toString()
+                        )
+                        val insertedId = repository.insert(placeholder).toInt()
+                        newDetected++
+
+                        val mode = preferencesManager?.getAutoAnalyzeMode() ?: AutoAnalyzeMode.UNKNOWN_ONLY
+                        val targets = preferencesManager?.getAutoAnalyzeTargets() ?: emptySet()
+                        val shouldAuto = CallMetadataParser.matchesAutoAnalyzeRule(file.name, mode, targets)
+
+                        if (shouldAuto && (isApiKeyConfigured() || isNvidiaKeyConfigured())) {
+                            processAudioFile(
+                                context = appContext,
+                                uri = file.uri,
+                                fileName = file.name,
+                                mimeType = file.mimeType,
+                                fileSize = file.size,
+                                existingId = insertedId
+                            )
+                            val updatedRec = repository.getById(insertedId)
+                            if (updatedRec != null && preferencesManager?.isCommitmentRemindersEnabled() == true) {
+                                val actions = CommitmentExtractor.extractActionItems(updatedRec.decodedSummary)
+                                val dates = CommitmentExtractor.extractDates(updatedRec.decodedSummary)
+                                NotificationHelper.notifyCommitments(appContext, file.name, actions, dates, insertedId)
+                            }
+                            NotificationHelper.notifyNewCallDetected(appContext, file.name, insertedId, isAutoAnalyzed = true)
+                        }
+                    }
+                }
+
+                if (newDetected > 0) {
+                    withContext(Dispatchers.Main) {
+                        updateStatusMessage.value = "Detected $newDetected new call recording(s)!"
+                    }
+                }
+            } catch (_: Exception) {
             }
         }
     }
@@ -771,6 +907,19 @@ class CallViewModel(
                         "✅ Call transcribed successfully with Gemini! I now have the full verbatim transcript. Ask me anything about this call!"
                     )
                 }
+                if (updated != null && preferencesManager?.isCommitmentRemindersEnabled() != false) {
+                    val actions = CommitmentExtractor.extractActionItems(updated.decodedSummary)
+                    val dates = CommitmentExtractor.extractDates(updated.decodedSummary)
+                    if (actions.isNotEmpty() || dates.isNotEmpty()) {
+                        NotificationHelper.notifyCommitments(
+                            context = context.applicationContext,
+                            callTitle = updated.title,
+                            actionItems = actions,
+                            dates = dates,
+                            recordingId = updated.id
+                        )
+                    }
+                }
                 updateStatusMessage.value = "Analysis complete! ✅"
             } else {
                 val err = result.exceptionOrNull()
@@ -817,13 +966,14 @@ class CallViewModelFactory(
     private val geminiRepository: GeminiRepository,
     private val gitHubUpdateRepository: GitHubUpdateRepository = GitHubUpdateRepository(),
     private val apiKeyManager: ApiKeyManager? = null,
-    private val nvidiaRepository: NvidiaRepository? = null
+    private val nvidiaRepository: NvidiaRepository? = null,
+    private val preferencesManager: CallPreferencesManager? = null
 ) : ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(CallViewModel::class.java)) {
             @Suppress("UNCHECKED_CAST")
             return CallViewModel(
-                repository, geminiRepository, gitHubUpdateRepository, apiKeyManager, nvidiaRepository
+                repository, geminiRepository, gitHubUpdateRepository, apiKeyManager, nvidiaRepository, preferencesManager
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

@@ -67,8 +67,11 @@ interface RecordingDao {
     @Query("SELECT * FROM recordings WHERE sourceUri = :uri LIMIT 1")
     suspend fun getRecordingByUri(uri: String): Recording?
 
+    @Query("SELECT * FROM recordings WHERE id = :id LIMIT 1")
+    suspend fun getRecordingById(id: Int): Recording?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertRecording(recording: Recording)
+    suspend fun insertRecording(recording: Recording): Long
 
     @Query("DELETE FROM recordings WHERE id = :id")
     suspend fun deleteRecordingById(id: Int)
@@ -87,7 +90,9 @@ class RecordingRepository(private val dao: RecordingDao) {
 
     suspend fun getByUri(uri: String): Recording? = dao.getRecordingByUri(uri)
 
-    suspend fun insert(recording: Recording) = dao.insertRecording(recording)
+    suspend fun getById(id: Int): Recording? = dao.getRecordingById(id)
+
+    suspend fun insert(recording: Recording): Long = dao.insertRecording(recording)
 
     suspend fun deleteById(id: Int) = dao.deleteRecordingById(id)
 }

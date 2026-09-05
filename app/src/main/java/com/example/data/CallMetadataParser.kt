@@ -21,13 +21,13 @@ object CallMetadataParser {
     private val phoneRegex = Regex("""(?:\+?\d{1,3}[\-.\s]?)?\(?\d{2,4}\)?[\-.\s]?\d{3,4}[\-.\s]?\d{3,4}""")
 
     // Prefixes to strip (case-insensitive)
-    private val prefixRegex = Regex("""(?i)^(call\s*recording|call|recording|rec|audio|voice)[\s_\-]*""")
+    private val prefixRegex = Regex("""(?i)^(call[_\s\-]*recording|call|recording|rec|audio|voice)[\s_\-]*""")
 
     // Direction markers to strip
     private val directionRegex = Regex("""(?i)[\s_\-]*(incoming|outgoing|in|out)[\s_\-]*""")
 
-    // Date-time stamps like 260307_125256 or 20240307_125256
-    private val dateTimeRegex = Regex("""\d{6,8}[_\-]\d{4,6}""")
+    // Date-time stamps like 260307_125256 or 20240307_125256 or 20240307
+    private val dateTimeRegex = Regex("""\d{6,8}[_\-]\d{4,6}|\b(19|20)\d{6}\b""")
 
     // Remaining separators
     private val separatorRegex = Regex("""[\s_\-]+""")
@@ -93,5 +93,103 @@ object CallMetadataParser {
         val minutes = totalSeconds / 60
         val seconds = totalSeconds % 60
         return String.format(Locale.US, "%02d:%02d", minutes, seconds)
+    }
+
+    fun isUnknownNumber(fileName: String): Boolean {
+        val lower = fileName.lowercase(Locale.ROOT)
+        if (lower.contains("unknown") || lower.contains("private")) {
+            return true
+        }
+
+        val baseName = fileName.substringBeforeLast(".")
+        val withoutTime = baseName
+            .replace(prefixRegex, "")
+            .replace(directionRegex, " ")
+            .replace(dateTimeRegex, "")
+            .replace(separatorRegex, " ")
+            .trim()
+
+        val digitCount = withoutTime.count { it.isDigit() }
+        val letterCount = withoutTime.count { it.isLetter() }
+
+        // If it starts with + or has 6+ digits and no letters, it's an unknown number / raw phone number
+        if ((withoutTime.startsWith("+") && digitCount >= 5) || (digitCount >= 6 && letterCount == 0)) {
+            return true
+        }
+
+        // If whole title is digits/plus/separators only
+        if (withoutTime.isNotBlank() && withoutTime.all { it.isDigit() || it == '+' || it == ' ' || it == '-' || it == '(' || it == ')' }) {
+            return true
+        }
+
+        return false
+    }
+
+    fun matchesAutoAnalyzeRule(
+        fileName: String,
+        mode: AutoAnalyzeMode,
+        targets: Set<String>
+    ): Boolean {
+        return when (mode) {
+            AutoAnalyzeMode.ALL -> true
+            AutoAnalyzeMode.MANUAL_ONLY -> false
+            AutoAnalyzeMode.UNKNOWN_ONLY -> isUnknownNumber(fileName)
+            AutoAnalyzeMode.SPECIFIC_CONTACTS -> {
+                if (targets.isEmpty()) return false
+                val baseName = fileName.substringBeforeLast(".")
+                val meta = parse(fileName)
+                val cleanNormalized = meta.cleanTitle.lowercase(Locale.ROOT).filter { it.isLetterOrDigit() || it.isWhitespace() }
+                val fileDigits = baseName.replace(dateTimeRegex, "").filter { it.isDigit() }
+
+                targets.any { target ->
+                    val targetClean = target.trim()
+                    val targetNormalized = targetClean.lowercase(Locale.ROOT).filter { it.isLetterOrDigit() || it.isWhitespace() }
+                    val targetDigits = targetClean.filter { it.isDigit() }
+
+                    (targetNormalized.isNotBlank() && cleanNormalized.contains(targetNormalized)) ||
+                    (targetDigits.length >= 6 && fileDigits.contains(targetDigits)) ||
+                    (fileDigits.length >= 6 && targetDigits.length >= 6 && targetDigits.contains(fileDigits))
+                }
+            }
+        }
+    }
+}
+
+object CommitmentExtractor {
+    private val actionItemHeaderRegex = Regex("""(?im)^[#*_ ]*(?:✅\s*)?(?:action items?|commitments?|to[- ]?dos?|tasks?)[^\n]*$""")
+    private val datesHeaderRegex = Regex("""(?im)^[#*_ ]*(?:📅\s*)?(?:dates?|times?|deadlines?|schedules?)[^\n]*$""")
+    private val nextHeaderRegex = Regex("""(?im)^[#*]{2,}\s+[^\n]+""")
+
+    fun extractActionItems(summary: String): List<String> {
+        return extractSectionItems(summary, actionItemHeaderRegex)
+    }
+
+    fun extractDates(summary: String): List<String> {
+        return extractSectionItems(summary, datesHeaderRegex)
+    }
+
+    private fun extractSectionItems(text: String, headerRegex: Regex): List<String> {
+        val headerMatch = headerRegex.find(text) ?: return emptyList()
+        val startIndex = headerMatch.range.last + 1
+        val remaining = text.substring(startIndex)
+
+        val nextHeader = nextHeaderRegex.find(remaining)
+        val sectionContent = if (nextHeader != null) {
+            remaining.substring(0, nextHeader.range.first)
+        } else {
+            remaining
+        }
+
+        return sectionContent.lines()
+            .map { line ->
+                line.trim()
+                    .removePrefix("•")
+                    .removePrefix("-")
+                    .removePrefix("*")
+                    .trim()
+                    .replace(Regex("""^\d+\.\s*"""), "")
+                    .trim()
+            }
+            .filter { it.isNotBlank() && !it.startsWith("#") && it.length > 3 && !it.equals("None", ignoreCase = true) && !it.contains("No explicit action", ignoreCase = true) }
     }
 }

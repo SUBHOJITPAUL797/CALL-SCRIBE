@@ -70,6 +70,13 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.ui.text.style.TextDecoration
+import com.example.data.AutoAnalyzeMode
+import com.example.data.CommitmentExtractor
 import com.example.data.CallMetadataParser
 import com.example.ui.ChatMessage
 import com.example.ui.MessageSender
@@ -83,6 +90,7 @@ class MainActivity : ComponentActivity() {
         val apiKeyManager = appContainer.getApiKeyManager(this)
         val geminiRepository = appContainer.getGeminiRepository(this)
         val nvidiaRepository = appContainer.getNvidiaRepository(this)
+        val preferencesManager = appContainer.getPreferencesManager(this)
         setContent {
             MyApplicationTheme {
                 val viewModel: CallViewModel = viewModel(
@@ -91,7 +99,8 @@ class MainActivity : ComponentActivity() {
                         geminiRepository,
                         appContainer.gitHubUpdateRepository,
                         apiKeyManager,
-                        nvidiaRepository
+                        nvidiaRepository,
+                        preferencesManager
                     )
                 )
 
@@ -131,6 +140,24 @@ fun CallScribeApp(viewModel: CallViewModel) {
     val syncErrorCount by viewModel.syncErrorCount.collectAsStateWithLifecycle()
 
     val showApiKeyDialog by viewModel.showApiKeyDialog.collectAsStateWithLifecycle()
+    val showRulesDialog by viewModel.showRulesDialog.collectAsStateWithLifecycle()
+    val autoAnalyzeMode by viewModel.autoAnalyzeMode.collectAsStateWithLifecycle()
+    val autoAnalyzeTargets by viewModel.autoAnalyzeTargets.collectAsStateWithLifecycle()
+    val autoSyncEnabled by viewModel.autoSyncEnabled.collectAsStateWithLifecycle()
+    val commitmentRemindersEnabled by viewModel.commitmentRemindersEnabled.collectAsStateWithLifecycle()
+    val completedActionItemKeys by viewModel.completedActionItemKeys.collectAsStateWithLifecycle()
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ -> }
+
+    LaunchedEffect(Unit) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+        viewModel.checkForNewRecordingsOnResume(context)
+    }
+
     val selectedFolderForLimit by viewModel.selectedFolderForLimit.collectAsStateWithLifecycle()
     val folderTotalRecordings by viewModel.folderTotalRecordings.collectAsStateWithLifecycle()
 
@@ -493,7 +520,7 @@ fun CallScribeApp(viewModel: CallViewModel) {
                     }
 
                     Spacer(Modifier.height(12.dp))
-                    androidx.compose.material3.Divider(color = Color.LightGray)
+                    HorizontalDivider(color = Color.LightGray)
                     Spacer(Modifier.height(12.dp))
 
                     // ── NVIDIA Section ───────────────────────────────────────
@@ -585,6 +612,230 @@ fun CallScribeApp(viewModel: CallViewModel) {
                     border = BorderStroke(2.dp, Color.Black)
                 ) {
                     Text("Cancel", fontWeight = FontWeight.Bold, color = Color.Black)
+                }
+            },
+            shape = RoundedCornerShape(16.dp),
+            containerColor = MaterialTheme.colorScheme.surface,
+            modifier = Modifier.border(3.dp, Color.Black, RoundedCornerShape(16.dp))
+        )
+    }
+
+    // Auto-Analyze & Sync Rules Dialog
+    if (showRulesDialog) {
+        var targetInput by remember { mutableStateOf("") }
+
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissRulesDialog() },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Tune, contentDescription = null, tint = Color.Black)
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "Auto-Analyze & Sync Rules",
+                        fontWeight = FontWeight.Black,
+                        color = Color.Black,
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                }
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text(
+                        text = "CALL AUTO-ANALYSIS RULE",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Black,
+                        color = Color.Black
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "Choose which call recordings are automatically transcribed & analyzed with AI when detected.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.DarkGray
+                    )
+                    Spacer(Modifier.height(8.dp))
+
+                    AutoAnalyzeMode.entries.forEach { mode ->
+                        val selected = (autoAnalyzeMode == mode)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 3.dp)
+                                .background(
+                                    if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.25f) else Color.Transparent,
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .border(
+                                    BorderStroke(if (selected) 2.dp else 1.dp, if (selected) Color.Black else Color.LightGray),
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .clickable { viewModel.setAutoAnalyzeMode(mode) }
+                                .padding(horizontal = 6.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = selected,
+                                onClick = { viewModel.setAutoAnalyzeMode(mode) },
+                                colors = RadioButtonDefaults.colors(
+                                    selectedColor = Color.Black,
+                                    unselectedColor = Color.DarkGray
+                                )
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Column {
+                                Text(
+                                    text = mode.displayName,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.Black
+                                )
+                                Text(
+                                    text = mode.description,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color.DarkGray
+                                )
+                            }
+                        }
+                    }
+
+                    // Target Contacts Input (when SPECIFIC_CONTACTS selected)
+                    if (autoAnalyzeMode == AutoAnalyzeMode.SPECIFIC_CONTACTS) {
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            text = "Designated VIP Numbers / Contacts:",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.Black
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = targetInput,
+                                onValueChange = { targetInput = it },
+                                placeholder = { Text("Name or Phone #") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Button(
+                                onClick = {
+                                    if (targetInput.isNotBlank()) {
+                                        viewModel.addAutoAnalyzeTarget(targetInput.trim())
+                                        targetInput = ""
+                                    }
+                                },
+                                shape = RoundedCornerShape(8.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                                border = BorderStroke(2.dp, Color.Black)
+                            ) {
+                                Text("Add", fontWeight = FontWeight.Bold, color = Color.Black)
+                            }
+                        }
+
+                        if (autoAnalyzeTargets.isNotEmpty()) {
+                            Spacer(Modifier.height(6.dp))
+                            LazyRow(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                items(autoAnalyzeTargets.toList()) { target ->
+                                    Row(
+                                        modifier = Modifier
+                                            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))
+                                            .border(1.5.dp, Color.Black, RoundedCornerShape(12.dp))
+                                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(target, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                        Spacer(Modifier.width(4.dp))
+                                        Icon(
+                                            Icons.Default.Close,
+                                            contentDescription = "Remove",
+                                            tint = Color.Black,
+                                            modifier = Modifier
+                                                .size(14.dp)
+                                                .clickable { viewModel.removeAutoAnalyzeTarget(target) }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(14.dp))
+                    HorizontalDivider(thickness = 1.dp, color = Color.Black)
+                    Spacer(Modifier.height(10.dp))
+
+                    // Background Auto-Sync Switch
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Background Auto-Sync",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Black,
+                                color = Color.Black
+                            )
+                            Text(
+                                text = "WorkManager automatically checks your recordings folder in background.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.DarkGray
+                            )
+                        }
+                        Switch(
+                            checked = autoSyncEnabled,
+                            onCheckedChange = { viewModel.setAutoSyncEnabled(context, it) }
+                        )
+                    }
+
+                    Spacer(Modifier.height(10.dp))
+                    HorizontalDivider(thickness = 1.dp, color = Color.Black)
+                    Spacer(Modifier.height(10.dp))
+
+                    // Commitment & Important Dates Reminders Switch
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Commitment & Date Alerts",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Black,
+                                color = Color.Black
+                            )
+                            Text(
+                                text = "Sends alerts when promises, deadlines, or dates are detected.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.DarkGray
+                            )
+                        }
+                        Switch(
+                            checked = commitmentRemindersEnabled,
+                            onCheckedChange = { viewModel.setCommitmentRemindersEnabled(it) }
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { viewModel.dismissRulesDialog() },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(2.dp, Color.Black)
+                ) {
+                    Text("Done", fontWeight = FontWeight.Bold, color = Color.Black)
                 }
             },
             shape = RoundedCornerShape(16.dp),
@@ -866,6 +1117,15 @@ fun CallScribeApp(viewModel: CallViewModel) {
             TopAppBar(
                 title = { Text("Call Scribe", fontWeight = FontWeight.Black, color = Color.Black) },
                 actions = {
+                    IconButton(
+                        onClick = { viewModel.showRulesDialog.value = true }
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Tune,
+                            contentDescription = "Auto-Analyze & Sync Rules",
+                            tint = Color.Black
+                        )
+                    }
                     IconButton(
                         onClick = { viewModel.showApiKeyDialog.value = true }
                     ) {
@@ -1167,6 +1427,12 @@ fun CallScribeApp(viewModel: CallViewModel) {
                         },
                         onReanalyze = {
                             viewModel.reanalyzeRecording(context, recording)
+                        },
+                        onToggleActionItem = { itemText ->
+                            viewModel.toggleActionItem(recording.id, itemText)
+                        },
+                        isActionItemCompleted = { itemText ->
+                            viewModel.isActionItemCompleted(recording.id, itemText)
                         }
                     )
                 }
@@ -1190,11 +1456,15 @@ fun RecordingCard(
     onShare: () -> Unit,
     onCopySummary: () -> Unit,
     onCopyTranscript: () -> Unit,
-    onReanalyze: () -> Unit = {}
+    onReanalyze: () -> Unit = {},
+    onToggleActionItem: (String) -> Unit = {},
+    isActionItemCompleted: (String) -> Boolean = { false }
 ) {
     var expanded by remember { mutableStateOf(false) }
     val dateFormat = remember { SimpleDateFormat("MMM dd, yyyy - HH:mm", Locale.getDefault()) }
     val metadata = remember(recording.title) { CallMetadataParser.parse(recording.title) }
+    val actionItems = remember(recording.decodedSummary) { CommitmentExtractor.extractActionItems(recording.decodedSummary) }
+    val dates = remember(recording.decodedSummary) { CommitmentExtractor.extractDates(recording.decodedSummary) }
 
     Box(
         modifier = Modifier
@@ -1380,7 +1650,7 @@ fun RecordingCard(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "SUMMARY & ACTION ITEMS",
+                                text = "SUMMARY & INSIGHTS",
                                 style = MaterialTheme.typography.labelLarge,
                                 color = Color.Black,
                                 fontWeight = FontWeight.Black
@@ -1397,6 +1667,7 @@ fun RecordingCard(
                             fontWeight = FontWeight.Bold
                         )
                         val needsAiTranscription = recording.decodedSummary.contains("Not Available") ||
+                            recording.decodedSummary.contains("Pending AI Analysis") ||
                             recording.decodedTranscription.contains("Transcription requires") ||
                             recording.decodedTranscription.contains("On-Device Speech Analysis") ||
                             !recording.decodedSummary.contains("##")
@@ -1409,6 +1680,115 @@ fun RecordingCard(
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Text("⚡ Transcribe & Analyze Call", fontWeight = FontWeight.Bold, color = Color.White)
+                            }
+                        }
+                    }
+                }
+
+                // Action Items & Commitments Checklist
+                if (actionItems.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFF0FDF4)),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(2.dp, Color(0xFF166534), RoundedCornerShape(12.dp))
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("✅", style = MaterialTheme.typography.labelLarge)
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    text = "COMMITMENTS & TO-DO ITEMS (${actionItems.size})",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Black,
+                                    color = Color(0xFF166534)
+                                )
+                            }
+                            Spacer(Modifier.height(4.dp))
+                            actionItems.forEach { item ->
+                                val completed = isActionItemCompleted(item)
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onToggleActionItem(item) }
+                                        .padding(vertical = 1.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Checkbox(
+                                        checked = completed,
+                                        onCheckedChange = { onToggleActionItem(item) },
+                                        colors = CheckboxDefaults.colors(
+                                            checkedColor = Color(0xFF166534),
+                                            uncheckedColor = Color.Black
+                                        )
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(
+                                        text = item,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = if (completed) Color.Gray else Color.Black,
+                                        fontWeight = if (completed) FontWeight.Normal else FontWeight.Bold,
+                                        textDecoration = if (completed) TextDecoration.LineThrough else null
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Important Dates & Deadlines
+                if (dates.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFEFF6FF)),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(2.dp, Color(0xFF1D4ED8), RoundedCornerShape(12.dp))
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text("📅", style = MaterialTheme.typography.labelLarge)
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        text = "DATES, TIMES & DEADLINES",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Black,
+                                        color = Color(0xFF1D4ED8)
+                                    )
+                                }
+                                TextButton(
+                                    onClick = onAddToCalendar,
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                                ) {
+                                    Text("+ Calendar", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color(0xFF1D4ED8))
+                                }
+                            }
+                            Spacer(Modifier.height(4.dp))
+                            dates.forEach { dateItem ->
+                                Row(
+                                    modifier = Modifier.padding(vertical = 1.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("•", fontWeight = FontWeight.Black, color = Color(0xFF1D4ED8))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        text = dateItem,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.Black
+                                    )
+                                }
                             }
                         }
                     }

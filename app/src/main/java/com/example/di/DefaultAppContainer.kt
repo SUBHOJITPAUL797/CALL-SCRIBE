@@ -22,6 +22,10 @@ object DefaultAppContainer {
         }
     }
 
+    fun getPreferencesManager(context: Context): com.example.data.CallPreferencesManager {
+        return com.example.data.CallPreferencesManager(context.applicationContext)
+    }
+
     fun getGeminiRepository(context: Context): GeminiRepository {
         val keyManager = getApiKeyManager(context)
         return GeminiRepository(apiKeyProvider = { keyManager.getApiKey() })
