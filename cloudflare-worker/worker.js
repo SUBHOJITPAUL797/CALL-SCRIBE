@@ -31,7 +31,7 @@ export default {
         message: "Call Scribe Cloudflare Worker is running!",
         models: {
           asr: "@cf/openai/whisper",
-          llm: "@cf/meta/llama-3.1-8b-instruct",
+          llm: "@cf/meta/llama-3.1-8b-instruct-fast",
         },
       });
     }
@@ -205,7 +205,7 @@ ${transcript.slice(0, 12000)}
 
 Please produce the structured analysis according to the specified format.`;
 
-  const aiResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
+  return await runLlmWithFallback(env, {
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt },
@@ -213,8 +213,6 @@ Please produce the structured analysis according to the specified format.`;
     max_tokens: 1024,
     temperature: 0.2,
   });
-
-  return aiResponse.response || aiResponse.text || "";
 }
 
 /**
@@ -225,16 +223,42 @@ async function runChat(env, transcript, summary, question) {
 
   const contextText = `Call Summary:\n${summary}\n\nCall Transcript:\n"""\n${transcript.slice(0, 10000)}\n"""`;
 
-  const aiResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: `${contextText}\n\nUser Question: ${question}` },
-    ],
-    max_tokens: 512,
-    temperature: 0.3,
-  });
+  try {
+    return await runLlmWithFallback(env, {
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: `${contextText}\n\nUser Question: ${question}` },
+      ],
+      max_tokens: 512,
+      temperature: 0.3,
+    });
+  } catch (e) {
+    return "Could not generate an answer at this time. Please try again.";
+  }
+}
 
-  return aiResponse.response || aiResponse.text || "No answer generated.";
+const LLM_MODELS = [
+  "@cf/meta/llama-3.1-8b-instruct-fast",
+  "@cf/meta/llama-3.1-8b-instruct-fp8",
+  "@cf/meta/llama-3.2-3b-instruct",
+  "@cf/meta/llama-3.2-1b-instruct",
+];
+
+async function runLlmWithFallback(env, payload) {
+  let lastError = null;
+  for (const model of LLM_MODELS) {
+    try {
+      const res = await env.AI.run(model, payload);
+      const text = res.response || res.text || "";
+      if (text.trim().length > 0) {
+        return text;
+      }
+    } catch (e) {
+      lastError = e;
+      console.warn(`Model ${model} failed (${e.message}), trying next...`);
+    }
+  }
+  throw lastError || new Error("All AI models failed to respond.");
 }
 
 function jsonResponse(data, status = 200) {
