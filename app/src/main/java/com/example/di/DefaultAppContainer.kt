@@ -36,6 +36,14 @@ object DefaultAppContainer {
         return NvidiaRepository(apiKeyProvider = { keyManager.getNvidiaApiKey() })
     }
 
+    fun getCloudflareWorkerRepository(context: Context): com.example.network.CloudflareWorkerRepository {
+        val keyManager = getApiKeyManager(context)
+        return com.example.network.CloudflareWorkerRepository(
+            urlProvider = { keyManager.getCloudflareWorkerUrl() },
+            tokenProvider = { keyManager.getCloudflareWorkerToken() }
+        )
+    }
+
     val gitHubUpdateRepository: GitHubUpdateRepository by lazy {
         GitHubUpdateRepository()
     }

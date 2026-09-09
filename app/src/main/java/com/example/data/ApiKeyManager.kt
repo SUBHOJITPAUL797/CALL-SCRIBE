@@ -55,8 +55,38 @@ class ApiKeyManager(context: Context) {
         prefs.edit().remove(KEY_NVIDIA_API_KEY).apply()
     }
 
+    // ── Cloudflare Worker AI ──────────────────────────────────────────────────
+
+    fun getCloudflareWorkerUrl(): String {
+        return prefs.getString(KEY_CLOUDFLARE_WORKER_URL, "")?.trim() ?: ""
+    }
+
+    fun setCloudflareWorkerUrl(url: String) {
+        val cleanUrl = url.trim().trimEnd('/')
+        prefs.edit().putString(KEY_CLOUDFLARE_WORKER_URL, cleanUrl).apply()
+    }
+
+    fun getCloudflareWorkerToken(): String {
+        return prefs.getString(KEY_CLOUDFLARE_WORKER_TOKEN, "")?.trim() ?: ""
+    }
+
+    fun setCloudflareWorkerToken(token: String) {
+        prefs.edit().putString(KEY_CLOUDFLARE_WORKER_TOKEN, token.trim()).apply()
+    }
+
+    fun isCloudflareConfigured(): Boolean {
+        val url = getCloudflareWorkerUrl()
+        return url.isNotBlank() && (url.startsWith("http://") || url.startsWith("https://"))
+    }
+
+    fun clearCloudflareConfig() {
+        prefs.edit().remove(KEY_CLOUDFLARE_WORKER_URL).remove(KEY_CLOUDFLARE_WORKER_TOKEN).apply()
+    }
+
     companion object {
         private const val KEY_GEMINI_API_KEY = "user_gemini_api_key"
         private const val KEY_NVIDIA_API_KEY = "user_nvidia_api_key"
+        private const val KEY_CLOUDFLARE_WORKER_URL = "user_cloudflare_worker_url"
+        private const val KEY_CLOUDFLARE_WORKER_TOKEN = "user_cloudflare_worker_token"
     }
 }

@@ -16,8 +16,10 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CalendarToday
 import androidx.compose.material.icons.filled.Close
@@ -40,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.data.Recording
+import com.example.data.PreferredEngine
 import com.example.di.DefaultAppContainer
 import com.example.ui.CallViewModel
 import com.example.ui.CallViewModelFactory
@@ -94,19 +97,20 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         val appContainer = DefaultAppContainer
         val apiKeyManager = appContainer.getApiKeyManager(this)
-        val geminiRepository = appContainer.getGeminiRepository(this)
         val nvidiaRepository = appContainer.getNvidiaRepository(this)
         val preferencesManager = appContainer.getPreferencesManager(this)
+        val cloudflareRepository = appContainer.getCloudflareWorkerRepository(this)
         setContent {
             MyApplicationTheme {
                 val viewModel: CallViewModel = viewModel(
                     factory = CallViewModelFactory(
                         appContainer.getRepository(this),
-                        geminiRepository,
+                        appContainer.getGeminiRepository(this),
                         appContainer.gitHubUpdateRepository,
                         apiKeyManager,
                         nvidiaRepository,
-                        preferencesManager
+                        preferencesManager,
+                        cloudflareRepository
                     )
                 )
 
@@ -198,14 +202,26 @@ fun CallScribeApp(viewModel: CallViewModel) {
     var nvidiaKeyTestResult by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
     var isTestingNvidiaKey by remember { mutableStateOf(false) }
 
+    var enteredCloudflareUrl by remember { mutableStateOf("") }
+    var enteredCloudflareToken by remember { mutableStateOf("") }
+    var cloudflareTokenVisible by remember { mutableStateOf(false) }
+    var cloudflareTestResult by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
+    var isTestingCloudflare by remember { mutableStateOf(false) }
+    var selectedEngine by remember { mutableStateOf(PreferredEngine.AUTO) }
+
     LaunchedEffect(showApiKeyDialog) {
         if (showApiKeyDialog) {
             enteredApiKey = viewModel.getApiKey()
             enteredNvidiaKey = viewModel.getNvidiaApiKey()
+            enteredCloudflareUrl = viewModel.getCloudflareUrl()
+            enteredCloudflareToken = viewModel.getCloudflareToken()
+            selectedEngine = viewModel.preferredEngine.value
             apiKeyTestResult = null
             nvidiaKeyTestResult = null
+            cloudflareTestResult = null
             isTestingKey = false
             isTestingNvidiaKey = false
+            isTestingCloudflare = false
         }
     }
 
@@ -454,7 +470,7 @@ fun CallScribeApp(viewModel: CallViewModel) {
         )
     }
 
-    // API Key Dialog
+    // API Key & AI Engine Dialog
     if (showApiKeyDialog) {
         AlertDialog(
             onDismissRequest = { viewModel.dismissApiKeyDialog() },
@@ -462,17 +478,147 @@ fun CallScribeApp(viewModel: CallViewModel) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Default.Key, contentDescription = null, tint = Color.Black)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("AI API Keys", fontWeight = FontWeight.Black, color = Color.Black)
+                    Text("AI Engines & API Keys", fontWeight = FontWeight.Black, color = Color.Black)
                 }
             },
             text = {
-                Column(modifier = Modifier.fillMaxWidth()) {
-
-                    // ── Gemini Section ───────────────────────────────────────
-                    Text("🤖 Gemini API Key (Primary)", fontWeight = FontWeight.Black, color = Color.Black, style = MaterialTheme.typography.labelLarge)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 480.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    // ── Active Engine Mode ──────────────────────────────────
+                    Text("🎯 Preferred Engine", fontWeight = FontWeight.Black, color = Color.Black, style = MaterialTheme.typography.labelLarge)
                     Spacer(Modifier.height(2.dp))
                     Text(
-                        text = "Best quality — transcription + summary + chat in one step.",
+                        text = "Choose how recordings are transcribed & analyzed:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.DarkGray
+                    )
+                    Spacer(Modifier.height(6.dp))
+
+                    PreferredEngine.values().forEach { engine ->
+                        val isSelected = (selectedEngine == engine)
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp)
+                                .clickable { selectedEngine = engine },
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (isSelected) Color(0xFFFFF9C4) else Color.White,
+                            border = BorderStroke(if (isSelected) 2.dp else 1.dp, if (isSelected) Color.Black else Color.LightGray)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = isSelected,
+                                    onClick = { selectedEngine = engine },
+                                    colors = RadioButtonDefaults.colors(selectedColor = Color.Black)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Column {
+                                    Text(engine.displayName, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
+                                    Text(engine.description, style = MaterialTheme.typography.bodySmall, color = Color.DarkGray)
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(12.dp))
+                    HorizontalDivider(color = Color.LightGray)
+                    Spacer(Modifier.height(12.dp))
+
+                    // ── Cloudflare Workers AI Section ────────────────────────
+                    Text("☁️ Cloudflare Workers AI (Whisper + Llama 3.1)", fontWeight = FontWeight.Black, color = Color.Black, style = MaterialTheme.typography.labelLarge)
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = "100% Free · 10,000 neurons/day · Self-hosted & Private Whisper ASR",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF0284C7),
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedTextField(
+                        value = enteredCloudflareUrl,
+                        onValueChange = { enteredCloudflareUrl = it; cloudflareTestResult = null },
+                        label = { Text("Worker URL (https://...workers.dev)", fontWeight = FontWeight.Bold) },
+                        placeholder = { Text("https://call-scribe-worker.xxx.workers.dev") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedTextField(
+                        value = enteredCloudflareToken,
+                        onValueChange = { enteredCloudflareToken = it; cloudflareTestResult = null },
+                        label = { Text("Secret Token (Optional Bearer Auth)", fontWeight = FontWeight.Bold) },
+                        placeholder = { Text("Paste Bearer token (if set)") },
+                        singleLine = true,
+                        visualTransformation = if (cloudflareTokenVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            IconButton(onClick = { cloudflareTokenVisible = !cloudflareTokenVisible }) {
+                                Icon(
+                                    imageVector = if (cloudflareTokenVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = "Toggle visibility",
+                                    tint = Color.Black
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    cloudflareTestResult?.let { (success, msg) ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                if (success) Icons.Default.CheckCircle else Icons.Default.Error,
+                                null,
+                                tint = if (success) Color(0xFF22C55E) else Color(0xFFEF4444),
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(msg, style = MaterialTheme.typography.labelSmall, color = if (success) Color(0xFF22C55E) else Color(0xFFEF4444), fontWeight = FontWeight.Bold)
+                        }
+                        Spacer(Modifier.height(2.dp))
+                    }
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        OutlinedButton(
+                            onClick = {
+                                if (enteredCloudflareUrl.isNotBlank() && !isTestingCloudflare) {
+                                    isTestingCloudflare = true; cloudflareTestResult = null
+                                    viewModel.testCloudflareWorker(enteredCloudflareUrl, enteredCloudflareToken) { ok, msg ->
+                                        cloudflareTestResult = Pair(ok, msg)
+                                        isTestingCloudflare = false
+                                    }
+                                }
+                            },
+                            enabled = enteredCloudflareUrl.isNotBlank() && !isTestingCloudflare,
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(2.dp, Color(0xFF0284C7))
+                        ) {
+                            if (isTestingCloudflare) {
+                                CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 2.dp, color = Color(0xFF0284C7))
+                                Spacer(Modifier.width(4.dp))
+                            }
+                            Text(if (isTestingCloudflare) "Testing..." else "Test Worker", fontWeight = FontWeight.Bold, color = Color(0xFF0284C7), style = MaterialTheme.typography.labelMedium)
+                        }
+                        TextButton(onClick = {
+                            try { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://developers.cloudflare.com/workers-ai/")).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }) } catch (_: Exception) {}
+                        }) { Text("Worker Docs →", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = Color(0xFF0284C7)) }
+                    }
+
+                    Spacer(Modifier.height(12.dp))
+                    HorizontalDivider(color = Color.LightGray)
+                    Spacer(Modifier.height(12.dp))
+
+                    // ── Gemini Section ───────────────────────────────────────
+                    Text("🤖 Gemini API Key (High Quality)", fontWeight = FontWeight.Black, color = Color.Black, style = MaterialTheme.typography.labelLarge)
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = "Native multimodal — transcription + summary + Q&A in one step.",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color.DarkGray
                     )
@@ -537,7 +683,7 @@ fun CallScribeApp(viewModel: CallViewModel) {
                     Text("⚡ NVIDIA API Key (Fallback)", fontWeight = FontWeight.Black, color = Color.Black, style = MaterialTheme.typography.labelLarge)
                     Spacer(Modifier.height(2.dp))
                     Text(
-                        text = "Used automatically when Gemini hits its free quota. Llama 3.1 70B + Canary ASR.",
+                        text = "Used automatically when Gemini hits free quota. Llama 3.1 70B + Canary ASR.",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color.DarkGray
                     )
@@ -594,7 +740,7 @@ fun CallScribeApp(viewModel: CallViewModel) {
                         }) { Text("Get Free Key →", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = Color(0xFF76B900)) }
                     }
 
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(10.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Default.CheckCircle, null, tint = Color(0xFF22C55E), modifier = Modifier.size(13.dp))
                         Spacer(Modifier.width(4.dp))
@@ -605,14 +751,16 @@ fun CallScribeApp(viewModel: CallViewModel) {
             confirmButton = {
                 Button(
                     onClick = {
-                        viewModel.saveApiKey(enteredApiKey)
+                        viewModel.setPreferredEngine(selectedEngine)
+                        viewModel.saveCloudflareConfig(enteredCloudflareUrl, enteredCloudflareToken)
                         viewModel.saveNvidiaApiKey(enteredNvidiaKey)
+                        viewModel.saveApiKey(enteredApiKey)
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                     shape = RoundedCornerShape(8.dp),
                     border = BorderStroke(2.dp, Color.Black)
                 ) {
-                    Text("Save Keys", fontWeight = FontWeight.Bold, color = Color.Black)
+                    Text("Save Settings", fontWeight = FontWeight.Bold, color = Color.Black)
                 }
             },
             dismissButton = {

@@ -43,6 +43,8 @@ import com.example.data.CallPreferencesManager
 import com.example.data.CallerProfile
 import com.example.data.CallerProfileBuilder
 import com.example.data.CommitmentExtractor
+import com.example.data.PreferredEngine
+import com.example.network.CloudflareWorkerRepository
 import com.example.sync.CallSyncWorker
 import com.example.sync.NotificationHelper
 import com.example.sync.SyncLock
@@ -61,7 +63,8 @@ class CallViewModel(
     private val gitHubUpdateRepository: GitHubUpdateRepository = GitHubUpdateRepository(),
     private val apiKeyManager: ApiKeyManager? = null,
     private val nvidiaRepository: NvidiaRepository? = null,
-    private val preferencesManager: CallPreferencesManager? = null
+    private val preferencesManager: CallPreferencesManager? = null,
+    private val cloudflareRepository: CloudflareWorkerRepository? = null
 ) : ViewModel() {
 
     val searchQuery = MutableStateFlow("")
@@ -109,19 +112,37 @@ class CallViewModel(
         checkForUpdates(manual = false)
     }
 
+    // AI Engine Preferences & Cloudflare Worker State
+    val preferredEngine = MutableStateFlow(preferencesManager?.getPreferredEngine() ?: PreferredEngine.AUTO)
+    val cloudflareWorkerUrl = MutableStateFlow(apiKeyManager?.getCloudflareWorkerUrl() ?: "")
+    val cloudflareWorkerToken = MutableStateFlow(apiKeyManager?.getCloudflareWorkerToken() ?: "")
+
     fun isApiKeyConfigured(): Boolean = geminiRepository.isApiKeyConfigured()
 
     fun isNvidiaKeyConfigured(): Boolean = nvidiaRepository?.isApiKeyConfigured() == true
 
+    fun isCloudflareConfigured(): Boolean = cloudflareRepository?.isConfigured() == true || (apiKeyManager?.isCloudflareConfigured() == true)
+
     fun getApiKey(): String = apiKeyManager?.getApiKey() ?: BuildConfig.GEMINI_API_KEY
 
     fun getNvidiaApiKey(): String = apiKeyManager?.getNvidiaApiKey() ?: ""
+
+    fun getCloudflareUrl(): String = apiKeyManager?.getCloudflareWorkerUrl() ?: ""
+
+    fun getCloudflareToken(): String = apiKeyManager?.getCloudflareWorkerToken() ?: ""
+
+    fun setPreferredEngine(engine: PreferredEngine) {
+        preferencesManager?.setPreferredEngine(engine)
+        preferredEngine.value = engine
+        updateStatusMessage.value = "Engine: ${engine.displayName}"
+    }
 
     fun saveApiKey(newKey: String) {
         apiKeyManager?.setApiKey(newKey)
         showApiKeyDialog.value = false
         val mode = when {
             newKey.isNotBlank() -> "Gemini API Key saved ✅"
+            isCloudflareConfigured() -> "Gemini key cleared. Cloudflare Worker still active."
             isNvidiaKeyConfigured() -> "Gemini key cleared. NVIDIA fallback still active."
             else -> "API Key cleared — using On-Device mode."
         }
@@ -131,6 +152,16 @@ class CallViewModel(
     fun saveNvidiaApiKey(newKey: String) {
         apiKeyManager?.setNvidiaApiKey(newKey)
         updateStatusMessage.value = if (newKey.isNotBlank()) "NVIDIA API Key saved ✅" else "NVIDIA key cleared."
+    }
+
+    fun saveCloudflareConfig(url: String, token: String) {
+        val cleanUrl = url.trim().trimEnd('/')
+        val cleanToken = token.trim()
+        apiKeyManager?.setCloudflareWorkerUrl(cleanUrl)
+        apiKeyManager?.setCloudflareWorkerToken(cleanToken)
+        cloudflareWorkerUrl.value = cleanUrl
+        cloudflareWorkerToken.value = cleanToken
+        updateStatusMessage.value = if (cleanUrl.isNotBlank()) "Cloudflare Worker saved ✅" else "Cloudflare Worker cleared."
     }
 
     fun testApiKey(apiKey: String, onResult: (Boolean, String) -> Unit) {
@@ -145,6 +176,18 @@ class CallViewModel(
         viewModelScope.launch {
             val tempRepo = NvidiaRepository(apiKeyProvider = { apiKey })
             val res = tempRepo.testApiKey(apiKey)
+            res.onSuccess { msg -> onResult(true, msg) }
+               .onFailure { err -> onResult(false, err.localizedMessage ?: "Connection error") }
+        }
+    }
+
+    fun testCloudflareWorker(url: String, token: String, onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch {
+            val tempRepo = cloudflareRepository ?: CloudflareWorkerRepository(
+                urlProvider = { url },
+                tokenProvider = { token }
+            )
+            val res = tempRepo.testConnection(testUrl = url, testToken = token)
             res.onSuccess { msg -> onResult(true, msg) }
                .onFailure { err -> onResult(false, err.localizedMessage ?: "Connection error") }
         }
@@ -216,6 +259,10 @@ class CallViewModel(
             !recording.decodedTranscription.contains("On-Device Speech Analysis")
 
         val mode = when {
+            preferredEngine.value == PreferredEngine.CLOUDFLARE && isCloudflareConfigured() -> "Cloudflare AI"
+            preferredEngine.value == PreferredEngine.NVIDIA && isNvidiaKeyConfigured() -> "NVIDIA Llama AI"
+            preferredEngine.value == PreferredEngine.GEMINI && isApiKeyConfigured() -> "Gemini AI"
+            isCloudflareConfigured() -> "Cloudflare AI"
             isApiKeyConfigured() -> "Gemini AI"
             isNvidiaKeyConfigured() -> "NVIDIA Llama AI"
             else -> "On-Device AI"
@@ -223,10 +270,10 @@ class CallViewModel(
 
         val initialText = if (hasRealTranscript) {
             "Hi! I am your call assistant for '${CallMetadataParser.cleanCallTitle(recording.title)}' ($mode).\nAsk me anything about what was discussed, promised, or scheduled in this call."
-        } else if (isApiKeyConfigured()) {
-            "Hi! This call was saved earlier before your Gemini API key was active.\n\n⚡ Tap '⚡ Transcribe' at the top of this chat (or on the call card) so Gemini can listen to the audio recording!"
+        } else if (isApiKeyConfigured() || isCloudflareConfigured() || isNvidiaKeyConfigured()) {
+            "Hi! This call was saved earlier before your AI engine was active.\n\n⚡ Tap '⚡ Transcribe' at the top of this chat (or on the call card) to analyze the audio recording!"
         } else {
-            "Hi! This call has no AI transcript yet. Tap 🔑 in the top bar to set your free Gemini API key."
+            "Hi! This call has no AI transcript yet. Tap 🔑 in the top bar to configure Cloudflare Worker, Gemini, or NVIDIA."
         }
 
         chatMessages.value = listOf(
@@ -259,8 +306,8 @@ class CallViewModel(
             !recording.decodedTranscription.contains("On-Device Speech Analysis")
 
         if (!hasRealTranscript) {
-            val reply = if (isApiKeyConfigured() && recording.sourceUri != null) {
-                "⚠️ This call has not been transcribed with Gemini yet. Please tap '⚡ Transcribe' at the top of this chat (or on the call card) so I can listen to the recording and answer your question!"
+            val reply = if ((isApiKeyConfigured() || isCloudflareConfigured()) && recording.sourceUri != null) {
+                "⚠️ This call has not been transcribed yet. Please tap '⚡ Transcribe' at the top of this chat (or on the call card) so I can listen to the recording and answer your question!"
             } else {
                 LocalAnalysisEngine.answerCallQuestionLocally(
                     recording.decodedTranscription, recording.decodedSummary, cleanQuestion
@@ -273,7 +320,18 @@ class CallViewModel(
 
         viewModelScope.launch {
             val answer = when {
-                // 1. Try Gemini first
+                // Cloudflare preferred
+                preferredEngine.value == PreferredEngine.CLOUDFLARE && isCloudflareConfigured() -> {
+                    val cfRes = cloudflareRepository?.chatWithCall(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
+                    cfRes?.getOrElse {
+                        if (isApiKeyConfigured()) {
+                            geminiRepository.chatWithCall(recording.decodedTranscription, recording.decodedSummary, cleanQuestion).getOrDefault("No answer")
+                        } else {
+                            LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
+                        }
+                    } ?: LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
+                }
+                // Gemini first (if configured)
                 isApiKeyConfigured() -> {
                     val geminiResult = geminiRepository.chatWithCall(
                         transcript = recording.decodedTranscription,
@@ -282,8 +340,11 @@ class CallViewModel(
                     )
                     if (geminiResult.isSuccess) {
                         geminiResult.getOrThrow()
+                    } else if (isCloudflareConfigured()) {
+                        cloudflareRepository?.chatWithCall(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)?.getOrElse {
+                            LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
+                        } ?: LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
                     } else {
-                        // 2. Gemini failed → try NVIDIA
                         val nvidiaResult = nvidiaRepository?.chatWithCall(
                             transcript = recording.decodedTranscription,
                             summary = recording.decodedSummary,
@@ -298,7 +359,18 @@ class CallViewModel(
                         )
                     }
                 }
-                // 2. No Gemini → try NVIDIA
+                // Cloudflare configured
+                isCloudflareConfigured() -> {
+                    val cfResult = cloudflareRepository?.chatWithCall(
+                        transcript = recording.decodedTranscription,
+                        summary = recording.decodedSummary,
+                        question = cleanQuestion
+                    )
+                    cfResult?.getOrElse {
+                        LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
+                    } ?: LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
+                }
+                // NVIDIA
                 isNvidiaKeyConfigured() -> {
                     val nvidiaResult = nvidiaRepository?.chatWithCall(
                         transcript = recording.decodedTranscription,
@@ -313,7 +385,7 @@ class CallViewModel(
                         recording.decodedTranscription, recording.decodedSummary, cleanQuestion
                     )
                 }
-                // 3. No keys → on-device
+                // On-device
                 else -> LocalAnalysisEngine.answerCallQuestionLocally(
                     recording.decodedTranscription, recording.decodedSummary, cleanQuestion
                 )
@@ -828,6 +900,7 @@ class CallViewModel(
 
     private val MAX_FILE_SIZE_GEMINI = 15L * 1024 * 1024  // 15 MB — Gemini inline limit
     private val MAX_FILE_SIZE_NVIDIA = 25L * 1024 * 1024  // 25 MB — NVIDIA ASR limit
+    private val MAX_FILE_SIZE_CLOUDFLARE = 50L * 1024 * 1024  // 50 MB — Cloudflare limit
 
     private suspend fun readAudioBytes(
         context: Context,
@@ -863,56 +936,96 @@ class CallViewModel(
             var transcription = ""
             var summary = ""
             var audioBytes: ByteArray? = null
+            val currentEngine = preferredEngine.value
 
-            // ── Step 1: Try Gemini (primary, cloud audio speech-to-text + summary) ──────────────
-            if (isApiKeyConfigured() && fileSize <= MAX_FILE_SIZE_GEMINI) {
-                val bytes = readAudioBytes(context, uri, MAX_FILE_SIZE_GEMINI)
-                audioBytes = bytes
-                if (bytes != null) {
-                    val base64Audio = Base64.encodeToString(bytes, Base64.NO_WRAP)
-                    var geminiResult = geminiRepository.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
-
-                    // If rate limit (429) hit, wait 3 seconds and retry once
-                    if (geminiResult.exceptionOrNull() is ApiQuotaExceededException) {
-                        kotlinx.coroutines.delay(3000)
-                        geminiResult = geminiRepository.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
-                    }
-
-                    if (geminiResult.isSuccess) {
-                        val pair = geminiResult.getOrThrow()
-                        transcription = pair.first
-                        summary = pair.second
-                    } else if (geminiResult.exceptionOrNull() is ApiQuotaExceededException && !isNvidiaKeyConfigured()) {
-                        // Rate limit/quota exceeded and no NVIDIA key configured
-                        return Result.failure(geminiResult.exceptionOrNull()!!)
-                    }
-                }
-            }
-
-            // ── Step 2: Try NVIDIA Canary ASR if Gemini transcription failed / unconfigured ─────────
-            if (transcription.isBlank() && isNvidiaKeyConfigured() && fileSize <= MAX_FILE_SIZE_NVIDIA) {
-                val bytes = audioBytes ?: readAudioBytes(context, uri, MAX_FILE_SIZE_NVIDIA)
-                if (bytes != null) {
-                    val asrRes = nvidiaRepository?.transcribeAudio(bytes, fileName, resolvedMime)
-                    if (asrRes?.isSuccess == true) {
-                        transcription = asrRes.getOrThrow()
-                    }
-                }
-            }
-
-            // ── Step 3: Try NVIDIA for Summarization if we have a transcript but no summary ────────
-            if (transcription.isNotBlank() && summary.isBlank() && isNvidiaKeyConfigured()) {
-                val sumResult = nvidiaRepository?.summarizeTranscript(transcription, fileName)
-                if (sumResult?.isSuccess == true) {
-                    summary = sumResult.getOrThrow()
-                }
-            }
-
-            // ── Step 4: Local on-device fallback (only if not configured or general failure) ─────
-            if (transcription.isBlank()) {
+            // ── Mode 0: Explicit On-Device Offline Selection ─────────────────────────────
+            if (currentEngine == PreferredEngine.ON_DEVICE) {
                 val (localTrans, localSum) = LocalAnalysisEngine.analyzeLocally("", fileName)
                 transcription = localTrans
                 summary = localSum
+            } else {
+                // ── Mode 1: Try Cloudflare Worker First (if preferred or in AUTO mode) ───
+                val tryCloudflareFirst = (currentEngine == PreferredEngine.CLOUDFLARE || currentEngine == PreferredEngine.AUTO) && isCloudflareConfigured()
+                if (tryCloudflareFirst && fileSize <= MAX_FILE_SIZE_CLOUDFLARE) {
+                    val bytes = readAudioBytes(context, uri, MAX_FILE_SIZE_CLOUDFLARE)
+                    audioBytes = bytes
+                    if (bytes != null) {
+                        val cfResult = cloudflareRepository?.analyzeAudio(bytes, fileName, resolvedMime)
+                        if (cfResult?.isSuccess == true) {
+                            val pair = cfResult.getOrThrow()
+                            transcription = pair.first
+                            summary = pair.second
+                        }
+                    }
+                }
+
+                // ── Mode 2: Try Gemini (if preferred, or if Cloudflare wasn't configured / failed) ─
+                val tryGemini = (currentEngine == PreferredEngine.GEMINI || transcription.isBlank()) && isApiKeyConfigured()
+                if (tryGemini && fileSize <= MAX_FILE_SIZE_GEMINI) {
+                    val bytes = audioBytes ?: readAudioBytes(context, uri, MAX_FILE_SIZE_GEMINI)
+                    audioBytes = bytes
+                    if (bytes != null) {
+                        val base64Audio = Base64.encodeToString(bytes, Base64.NO_WRAP)
+                        var geminiResult = geminiRepository.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
+
+                        // If rate limit (429) hit, wait 3 seconds and retry once
+                        if (geminiResult.exceptionOrNull() is ApiQuotaExceededException) {
+                            kotlinx.coroutines.delay(3000)
+                            geminiResult = geminiRepository.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
+                        }
+
+                        if (geminiResult.isSuccess) {
+                            val pair = geminiResult.getOrThrow()
+                            transcription = pair.first
+                            summary = pair.second
+                        }
+                    }
+                }
+
+                // ── Mode 3: Try Cloudflare as fallback (if Gemini was preferred and failed) ─
+                if (transcription.isBlank() && isCloudflareConfigured() && fileSize <= MAX_FILE_SIZE_CLOUDFLARE) {
+                    val bytes = audioBytes ?: readAudioBytes(context, uri, MAX_FILE_SIZE_CLOUDFLARE)
+                    audioBytes = bytes
+                    if (bytes != null) {
+                        val cfResult = cloudflareRepository?.analyzeAudio(bytes, fileName, resolvedMime)
+                        if (cfResult?.isSuccess == true) {
+                            val pair = cfResult.getOrThrow()
+                            transcription = pair.first
+                            summary = pair.second
+                        }
+                    }
+                }
+
+                // ── Mode 4: Try NVIDIA Canary ASR if transcription still blank ─────────
+                if (transcription.isBlank() && isNvidiaKeyConfigured() && fileSize <= MAX_FILE_SIZE_NVIDIA) {
+                    val bytes = audioBytes ?: readAudioBytes(context, uri, MAX_FILE_SIZE_NVIDIA)
+                    audioBytes = bytes
+                    if (bytes != null) {
+                        val asrRes = nvidiaRepository?.transcribeAudio(bytes, fileName, resolvedMime)
+                        if (asrRes?.isSuccess == true) {
+                            transcription = asrRes.getOrThrow()
+                        }
+                    }
+                }
+
+                // ── Mode 5: Summarization fallback if we have a transcript but no summary ───
+                if (transcription.isNotBlank() && summary.isBlank()) {
+                    if (isCloudflareConfigured()) {
+                        val cfSum = cloudflareRepository?.summarizeTranscript(transcription, fileName)
+                        if (cfSum?.isSuccess == true) summary = cfSum.getOrThrow()
+                    }
+                    if (summary.isBlank() && isNvidiaKeyConfigured()) {
+                        val sumResult = nvidiaRepository?.summarizeTranscript(transcription, fileName)
+                        if (sumResult?.isSuccess == true) summary = sumResult.getOrThrow()
+                    }
+                }
+
+                // ── Mode 6: Local on-device fallback if cloud engines are unconfigured or failed ──
+                if (transcription.isBlank()) {
+                    val (localTrans, localSum) = LocalAnalysisEngine.analyzeLocally("", fileName)
+                    transcription = localTrans
+                    summary = localSum
+                }
             }
 
             val recording = Recording(
@@ -944,8 +1057,8 @@ class CallViewModel(
 
     fun reanalyzeRecording(context: Context, recording: Recording) {
         val uriStr = recording.sourceUri ?: return
-        if (!isApiKeyConfigured() && !isNvidiaKeyConfigured()) {
-            updateStatusMessage.value = "⚠️ Please configure an API Key (Gemini or NVIDIA) first."
+        if (!isApiKeyConfigured() && !isNvidiaKeyConfigured() && !isCloudflareConfigured() && preferredEngine.value != PreferredEngine.ON_DEVICE) {
+            updateStatusMessage.value = "⚠️ Please configure an AI Engine (Cloudflare, Gemini, or NVIDIA) first."
             return
         }
 
@@ -1053,13 +1166,14 @@ class CallViewModelFactory(
     private val gitHubUpdateRepository: GitHubUpdateRepository = GitHubUpdateRepository(),
     private val apiKeyManager: ApiKeyManager? = null,
     private val nvidiaRepository: NvidiaRepository? = null,
-    private val preferencesManager: CallPreferencesManager? = null
+    private val preferencesManager: CallPreferencesManager? = null,
+    private val cloudflareRepository: CloudflareWorkerRepository? = null
 ) : ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(CallViewModel::class.java)) {
             @Suppress("UNCHECKED_CAST")
             return CallViewModel(
-                repository, geminiRepository, gitHubUpdateRepository, apiKeyManager, nvidiaRepository, preferencesManager
+                repository, geminiRepository, gitHubUpdateRepository, apiKeyManager, nvidiaRepository, preferencesManager, cloudflareRepository
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

@@ -17,6 +17,7 @@ import com.example.data.CallMetadataParser
 import com.example.data.CallPreferencesManager
 import com.example.data.CommitmentExtractor
 import com.example.data.LocalAnalysisEngine
+import com.example.data.PreferredEngine
 import com.example.data.Recording
 import com.example.data.SimpleEncryption
 import com.example.di.DefaultAppContainer
@@ -33,7 +34,7 @@ class CallSyncWorker(
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         SyncLock.mutex.withLock {
-            val prefs = CallPreferencesManager(appContext)
+            val prefs = DefaultAppContainer.getPreferencesManager(appContext)
 
             // Check if background auto-sync is enabled
             if (!prefs.isAutoSyncEnabled()) {
@@ -50,6 +51,8 @@ class CallSyncWorker(
             val repository = DefaultAppContainer.getRepository(appContext)
             val geminiRepo = DefaultAppContainer.getGeminiRepository(appContext)
             val nvidiaRepo = DefaultAppContainer.getNvidiaRepository(appContext)
+            val cloudflareRepo = DefaultAppContainer.getCloudflareWorkerRepository(appContext)
+            val preferredEngine = prefs.getPreferredEngine()
             val mode = prefs.getAutoAnalyzeMode()
             val targets = prefs.getAutoAnalyzeTargets()
             val commitmentRemindersEnabled = prefs.isCommitmentRemindersEnabled()
@@ -95,7 +98,9 @@ class CallSyncWorker(
                     // 2. Check if this call matches the user's Auto-Analyze rule
                     val shouldAutoAnalyze = CallMetadataParser.matchesAutoAnalyzeRule(fileInfo.name, mode, targets)
 
-                    if (shouldAutoAnalyze && (geminiRepo.isApiKeyConfigured() || nvidiaRepo.isApiKeyConfigured())) {
+                    val hasAnyEngine = geminiRepo.isApiKeyConfigured() || nvidiaRepo.isApiKeyConfigured() || cloudflareRepo.isConfigured() || preferredEngine == PreferredEngine.ON_DEVICE
+
+                    if (shouldAutoAnalyze && hasAnyEngine) {
                         // Perform background audio analysis
                         val analysisResult = processAudio(
                             context = appContext,
@@ -104,7 +109,9 @@ class CallSyncWorker(
                             mimeType = fileInfo.mimeType,
                             fileSize = fileInfo.size,
                             geminiRepo = geminiRepo,
-                            nvidiaRepo = nvidiaRepo
+                            nvidiaRepo = nvidiaRepo,
+                            cloudflareRepo = cloudflareRepo,
+                            preferredEngine = preferredEngine
                         )
 
                         val finalTranscription = analysisResult.first
@@ -243,21 +250,46 @@ class CallSyncWorker(
         mimeType: String?,
         fileSize: Long,
         geminiRepo: com.example.network.GeminiRepository,
-        nvidiaRepo: com.example.network.NvidiaRepository
+        nvidiaRepo: com.example.network.NvidiaRepository,
+        cloudflareRepo: com.example.network.CloudflareWorkerRepository,
+        preferredEngine: PreferredEngine
     ): Pair<String, String> {
         val maxFileSizeGemini = 15L * 1024 * 1024
         val maxFileSizeNvidia = 25L * 1024 * 1024
+        val maxFileSizeCloudflare = 50L * 1024 * 1024
         val resolvedMime = mimeType ?: context.contentResolver.getType(uri) ?: "audio/mp3"
 
         var transcription = ""
         var summary = ""
         var audioBytes: ByteArray? = null
 
-        // 1. Try Gemini cloud transcription + summary
-        if (geminiRepo.isApiKeyConfigured() && fileSize <= maxFileSizeGemini) {
-            audioBytes = readAudioBytes(context, uri, maxFileSizeGemini)
+        // 0. If ON_DEVICE preferred
+        if (preferredEngine == PreferredEngine.ON_DEVICE) {
+            val (locTrans, locSum) = LocalAnalysisEngine.analyzeLocally("", fileName)
+            return Pair(locTrans, locSum)
+        }
+
+        // 1. Try Cloudflare Worker first if preferred or in AUTO mode
+        val tryCloudflareFirst = (preferredEngine == PreferredEngine.CLOUDFLARE || preferredEngine == PreferredEngine.AUTO) && cloudflareRepo.isConfigured()
+        if (tryCloudflareFirst && fileSize <= maxFileSizeCloudflare) {
+            audioBytes = readAudioBytes(context, uri, maxFileSizeCloudflare)
             if (audioBytes != null) {
-                val base64Audio = Base64.encodeToString(audioBytes, Base64.NO_WRAP)
+                val cfRes = cloudflareRepo.analyzeAudio(audioBytes, fileName, resolvedMime)
+                if (cfRes.isSuccess) {
+                    val pair = cfRes.getOrThrow()
+                    transcription = pair.first
+                    summary = pair.second
+                }
+            }
+        }
+
+        // 2. Try Gemini (if preferred or Cloudflare wasn't configured / failed)
+        val tryGemini = (preferredEngine == PreferredEngine.GEMINI || transcription.isBlank()) && geminiRepo.isApiKeyConfigured()
+        if (tryGemini && fileSize <= maxFileSizeGemini) {
+            val bytes = audioBytes ?: readAudioBytes(context, uri, maxFileSizeGemini)
+            audioBytes = bytes
+            if (bytes != null) {
+                val base64Audio = Base64.encodeToString(bytes, Base64.NO_WRAP)
                 val geminiRes = geminiRepo.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
                 if (geminiRes.isSuccess) {
                     val pair = geminiRes.getOrThrow()
@@ -267,7 +299,21 @@ class CallSyncWorker(
             }
         }
 
-        // 2. If transcription failed / empty, try NVIDIA Canary ASR
+        // 3. Fallback to Cloudflare if Gemini was preferred but failed
+        if (transcription.isBlank() && cloudflareRepo.isConfigured() && fileSize <= maxFileSizeCloudflare) {
+            val bytes = audioBytes ?: readAudioBytes(context, uri, maxFileSizeCloudflare)
+            audioBytes = bytes
+            if (bytes != null) {
+                val cfRes = cloudflareRepo.analyzeAudio(bytes, fileName, resolvedMime)
+                if (cfRes.isSuccess) {
+                    val pair = cfRes.getOrThrow()
+                    transcription = pair.first
+                    summary = pair.second
+                }
+            }
+        }
+
+        // 4. Try NVIDIA Canary ASR if transcription still blank
         if (transcription.isBlank() && nvidiaRepo.isApiKeyConfigured() && fileSize <= maxFileSizeNvidia) {
             val bytes = audioBytes ?: readAudioBytes(context, uri, maxFileSizeNvidia)
             if (bytes != null) {
@@ -278,15 +324,19 @@ class CallSyncWorker(
             }
         }
 
-        // 3. If we have transcription but summary is blank, try NVIDIA Llama summarization
-        if (transcription.isNotBlank() && summary.isBlank() && nvidiaRepo.isApiKeyConfigured()) {
-            val sumRes = nvidiaRepo.summarizeTranscript(transcription, fileName)
-            if (sumRes.isSuccess) {
-                summary = sumRes.getOrThrow()
+        // 5. Summarization fallback if needed
+        if (transcription.isNotBlank() && summary.isBlank()) {
+            if (cloudflareRepo.isConfigured()) {
+                val cfSum = cloudflareRepo.summarizeTranscript(transcription, fileName)
+                if (cfSum.isSuccess) summary = cfSum.getOrThrow()
+            }
+            if (summary.isBlank() && nvidiaRepo.isApiKeyConfigured()) {
+                val sumRes = nvidiaRepo.summarizeTranscript(transcription, fileName)
+                if (sumRes.isSuccess) summary = sumRes.getOrThrow()
             }
         }
 
-        // 4. Local on-device fallback if still blank
+        // 6. Local on-device fallback if still blank
         if (transcription.isBlank()) {
             val (locTrans, locSum) = LocalAnalysisEngine.analyzeLocally("", fileName)
             transcription = locTrans

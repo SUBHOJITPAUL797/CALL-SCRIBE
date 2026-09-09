@@ -10,6 +10,14 @@ enum class AutoAnalyzeMode(val displayName: String, val description: String) {
     MANUAL_ONLY("Manual Only", "Show new calls immediately; analyze when you tap")
 }
 
+enum class PreferredEngine(val displayName: String, val description: String) {
+    AUTO("⚡ Auto Fallback", "Smart fallback: Cloudflare / Gemini → NVIDIA → On-Device"),
+    CLOUDFLARE("☁️ Cloudflare Worker", "Whisper AI on Cloudflare edge (10k free neurons/day)"),
+    GEMINI("🤖 Google Gemini", "Gemini 1.5 Flash cloud analysis"),
+    NVIDIA("⚡ NVIDIA NIM", "Canary ASR + Llama 3.1 70B"),
+    ON_DEVICE("📱 On-Device (Offline)", "Local extractive analysis, 100% offline & private")
+}
+
 class CallPreferencesManager(context: Context) {
     private val prefs: SharedPreferences = context.applicationContext.getSharedPreferences(
         PREFS_NAME,
@@ -110,6 +118,21 @@ class CallPreferencesManager(context: Context) {
         prefs.edit().putStringSet(KEY_COMPLETED_ACTION_ITEMS, current).apply()
     }
 
+    // ── Preferred AI Engine ───────────────────────────────────────────────────
+
+    fun getPreferredEngine(): PreferredEngine {
+        val saved = prefs.getString(KEY_PREFERRED_ENGINE, PreferredEngine.AUTO.name)
+        return try {
+            PreferredEngine.valueOf(saved ?: PreferredEngine.AUTO.name)
+        } catch (_: Exception) {
+            PreferredEngine.AUTO
+        }
+    }
+
+    fun setPreferredEngine(engine: PreferredEngine) {
+        prefs.edit().putString(KEY_PREFERRED_ENGINE, engine.name).apply()
+    }
+
     companion object {
         private const val PREFS_NAME = "call_scribe_prefs"
         private const val KEY_PERSISTED_FOLDER_URI = "persisted_folder_uri"
@@ -118,5 +141,6 @@ class CallPreferencesManager(context: Context) {
         private const val KEY_AUTO_ANALYZE_TARGETS = "auto_analyze_targets"
         private const val KEY_COMMITMENT_REMINDERS_ENABLED = "commitment_reminders_enabled"
         private const val KEY_COMPLETED_ACTION_ITEMS = "completed_action_items"
+        private const val KEY_PREFERRED_ENGINE = "preferred_ai_engine"
     }
 }
