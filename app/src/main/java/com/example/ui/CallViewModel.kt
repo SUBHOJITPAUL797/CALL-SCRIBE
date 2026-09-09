@@ -661,7 +661,8 @@ class CallViewModel(
                             val targets = preferencesManager?.getAutoAnalyzeTargets() ?: emptySet()
                             val shouldAuto = CallMetadataParser.matchesAutoAnalyzeRule(file.name, mode, targets)
 
-                            if (shouldAuto && (isApiKeyConfigured() || isNvidiaKeyConfigured())) {
+                            val canAnalyze = isCloudflareConfigured() || isApiKeyConfigured() || isNvidiaKeyConfigured() || (preferredEngine.value == PreferredEngine.ON_DEVICE)
+                            if (shouldAuto && canAnalyze) {
                                 processAudioFile(
                                     context = appContext,
                                     uri = file.uri,
@@ -701,7 +702,7 @@ class CallViewModel(
 
         syncJob = viewModelScope.launch {
             isSyncing.value = true
-            val modeLabel = if (isApiKeyConfigured()) "Gemini AI" else "On-Device AI"
+            val modeLabel = preferredEngine.value.displayName
             syncStatus.value = "Preparing recordings ($modeLabel)..."
             syncProgress.value = 0f
             syncProcessedCount.value = 0
@@ -900,7 +901,7 @@ class CallViewModel(
 
     private val MAX_FILE_SIZE_GEMINI = 15L * 1024 * 1024  // 15 MB — Gemini inline limit
     private val MAX_FILE_SIZE_NVIDIA = 25L * 1024 * 1024  // 25 MB — NVIDIA ASR limit
-    private val MAX_FILE_SIZE_CLOUDFLARE = 50L * 1024 * 1024  // 50 MB — Cloudflare limit
+    private val MAX_FILE_SIZE_CLOUDFLARE = 24L * 1024 * 1024  // 24 MB — Safe under Cloudflare 25 MB payload limit
 
     private suspend fun readAudioBytes(
         context: Context,
@@ -982,8 +983,8 @@ class CallViewModel(
                     }
                 }
 
-                // ── Mode 3: Try Cloudflare as fallback (if Gemini was preferred and failed) ─
-                if (transcription.isBlank() && isCloudflareConfigured() && fileSize <= MAX_FILE_SIZE_CLOUDFLARE) {
+                // ── Mode 3: Try Cloudflare as fallback (if Gemini was preferred and failed, and Cloudflare wasn't tried yet) ─
+                if (transcription.isBlank() && !tryCloudflareFirst && isCloudflareConfigured() && fileSize <= MAX_FILE_SIZE_CLOUDFLARE) {
                     val bytes = audioBytes ?: readAudioBytes(context, uri, MAX_FILE_SIZE_CLOUDFLARE)
                     audioBytes = bytes
                     if (bytes != null) {
@@ -1018,12 +1019,19 @@ class CallViewModel(
                         val sumResult = nvidiaRepository?.summarizeTranscript(transcription, fileName)
                         if (sumResult?.isSuccess == true) summary = sumResult.getOrThrow()
                     }
+                    if (summary.isBlank()) {
+                        val (_, localSum) = LocalAnalysisEngine.analyzeLocally(transcription, fileName)
+                        summary = localSum
+                    }
                 }
 
                 // ── Mode 6: Local on-device fallback if cloud engines are unconfigured or failed ──
                 if (transcription.isBlank()) {
                     val (localTrans, localSum) = LocalAnalysisEngine.analyzeLocally("", fileName)
                     transcription = localTrans
+                    summary = localSum
+                } else if (summary.isBlank()) {
+                    val (_, localSum) = LocalAnalysisEngine.analyzeLocally(transcription, fileName)
                     summary = localSum
                 }
             }

@@ -256,7 +256,7 @@ class CallSyncWorker(
     ): Pair<String, String> {
         val maxFileSizeGemini = 15L * 1024 * 1024
         val maxFileSizeNvidia = 25L * 1024 * 1024
-        val maxFileSizeCloudflare = 50L * 1024 * 1024
+        val maxFileSizeCloudflare = 24L * 1024 * 1024  // 24 MB — Safe under Cloudflare 25 MB payload limit
         val resolvedMime = mimeType ?: context.contentResolver.getType(uri) ?: "audio/mp3"
 
         var transcription = ""
@@ -299,8 +299,8 @@ class CallSyncWorker(
             }
         }
 
-        // 3. Fallback to Cloudflare if Gemini was preferred but failed
-        if (transcription.isBlank() && cloudflareRepo.isConfigured() && fileSize <= maxFileSizeCloudflare) {
+        // 3. Fallback to Cloudflare if Gemini was preferred but failed, and Cloudflare wasn't tried yet
+        if (transcription.isBlank() && !tryCloudflareFirst && cloudflareRepo.isConfigured() && fileSize <= maxFileSizeCloudflare) {
             val bytes = audioBytes ?: readAudioBytes(context, uri, maxFileSizeCloudflare)
             audioBytes = bytes
             if (bytes != null) {
@@ -334,12 +334,19 @@ class CallSyncWorker(
                 val sumRes = nvidiaRepo.summarizeTranscript(transcription, fileName)
                 if (sumRes.isSuccess) summary = sumRes.getOrThrow()
             }
+            if (summary.isBlank()) {
+                val (_, locSum) = LocalAnalysisEngine.analyzeLocally(transcription, fileName)
+                summary = locSum
+            }
         }
 
         // 6. Local on-device fallback if still blank
         if (transcription.isBlank()) {
             val (locTrans, locSum) = LocalAnalysisEngine.analyzeLocally("", fileName)
             transcription = locTrans
+            summary = locSum
+        } else if (summary.isBlank()) {
+            val (_, locSum) = LocalAnalysisEngine.analyzeLocally(transcription, fileName)
             summary = locSum
         }
 
