@@ -58,6 +58,9 @@ class ApiKeyManager(context: Context) {
     // ── Cloudflare Worker AI ──────────────────────────────────────────────────
 
     fun getCloudflareWorkerUrl(): String {
+        if (!prefs.contains(KEY_CLOUDFLARE_WORKER_URL)) {
+            return DEFAULT_CLOUDFLARE_WORKER_URL
+        }
         return prefs.getString(KEY_CLOUDFLARE_WORKER_URL, "")?.trim() ?: ""
     }
 
@@ -80,10 +83,11 @@ class ApiKeyManager(context: Context) {
     }
 
     fun clearCloudflareConfig() {
-        prefs.edit().remove(KEY_CLOUDFLARE_WORKER_URL).remove(KEY_CLOUDFLARE_WORKER_TOKEN).apply()
+        prefs.edit().putString(KEY_CLOUDFLARE_WORKER_URL, "").remove(KEY_CLOUDFLARE_WORKER_TOKEN).apply()
     }
 
     companion object {
+        const val DEFAULT_CLOUDFLARE_WORKER_URL = "https://callscribe-ai.subhojit.workers.dev"
         private const val KEY_GEMINI_API_KEY = "user_gemini_api_key"
         private const val KEY_NVIDIA_API_KEY = "user_nvidia_api_key"
         private const val KEY_CLOUDFLARE_WORKER_URL = "user_cloudflare_worker_url"

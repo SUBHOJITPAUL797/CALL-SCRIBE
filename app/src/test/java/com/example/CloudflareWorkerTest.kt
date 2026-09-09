@@ -59,6 +59,13 @@ class CloudflareWorkerTest {
     }
 
     @Test
+    fun testDefaultCloudflareWorkerUrl() {
+        assertEquals("https://callscribe-ai.subhojit.workers.dev", com.example.data.ApiKeyManager.DEFAULT_CLOUDFLARE_WORKER_URL)
+        val defaultRepo = CloudflareWorkerRepository(urlProvider = { com.example.data.ApiKeyManager.DEFAULT_CLOUDFLARE_WORKER_URL })
+        assertTrue(defaultRepo.isConfigured())
+    }
+
+    @Test
     fun testCloudflareTranscribeResponseParsing() {
         // Standard Cloudflare Worker /transcribe response
         val jsonStandard = JSONObject("""{"success": true, "transcription": "Hello, I am calling regarding tomorrow's meeting."}""")
