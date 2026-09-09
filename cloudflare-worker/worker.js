@@ -2,8 +2,9 @@
  * Call Scribe — Cloudflare Worker AI Transcribe & Summarize Engine
  * 
  * Powered by Cloudflare Workers AI:
- * - Speech-to-Text: @cf/openai/whisper
- * - Summarization & Commitments: @cf/meta/llama-3.1-8b-instruct
+ * - Speech-to-Text: @cf/openai/whisper-large-v3-turbo (fallback to @cf/openai/whisper)
+ * - Anti-hallucination & silence filtering: Silero VAD + condition_on_previous_text=false
+ * - Summarization & Commitments: @cf/meta/llama-3.1-8b-instruct-fast
  * 
  * Free Tier: 10,000 AI Neurons per day on Cloudflare!
  */
@@ -16,7 +17,7 @@ export default {
         headers: {
           "Access-Control-Allow-Origin": "*",
           "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization",
+          "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Call-Title",
         },
       });
     }
@@ -30,8 +31,14 @@ export default {
         status: "ok",
         message: "Call Scribe Cloudflare Worker is running!",
         models: {
-          asr: "@cf/openai/whisper",
+          asr_primary: "@cf/openai/whisper-large-v3-turbo",
+          asr_fallback: "@cf/openai/whisper",
           llm: "@cf/meta/llama-3.1-8b-instruct-fast",
+        },
+        features: {
+          vad_filter: true,
+          condition_on_previous_text: false,
+          hallucination_filter: true,
         },
       });
     }
@@ -66,13 +73,13 @@ export default {
         }
 
         const audioUint8 = new Uint8Array(audioBuffer);
-        const whisperResult = await env.AI.run("@cf/openai/whisper", {
-          audio: [...audioUint8],
-        });
+        const whisperResult = await runWhisperWithFallback(env, audioUint8);
+        const rawTranscription = (whisperResult.text || whisperResult.transcription || "").trim();
+        const transcription = cleanWhisperTranscript(rawTranscription);
 
-        const transcription = whisperResult.text || "";
         return jsonResponse({
-          transcription: transcription.trim(),
+          transcription: transcription.length > 0 ? transcription : "(No audible speech detected)",
+          raw: transcription.length === 0 ? rawTranscription : undefined,
           vtt: whisperResult.vtt || null,
         });
       } catch (err) {
@@ -84,11 +91,15 @@ export default {
     if (path === "/summarize") {
       try {
         const body = await request.json();
-        const transcript = body.transcript || "";
+        const rawTranscript = body.transcript || "";
         const callTitle = body.callTitle || "Call Recording";
 
+        const transcript = cleanWhisperTranscript(rawTranscript);
+
         if (!transcript.trim()) {
-          return jsonResponse({ error: "No transcript provided to summarize." }, 400);
+          return jsonResponse({
+            summary: `## 📋 Executive Summary\nNo clear speech or coherent conversation was detected in this call recording.\n\n## 📝 Key Discussion Points\n- None detected\n\n## ✅ Action Items & Commitments\n- None\n\n## 📅 Dates & Deadlines\n- None`,
+          });
         }
 
         const summaryText = await runSummarization(env, transcript, callTitle);
@@ -104,7 +115,7 @@ export default {
     if (path === "/chat") {
       try {
         const body = await request.json();
-        const transcript = body.transcript || "";
+        const transcript = cleanWhisperTranscript(body.transcript || "");
         const summary = body.summary || "";
         const question = body.question || "";
 
@@ -143,22 +154,21 @@ export default {
           return jsonResponse({ error: "No audio data received." }, 400);
         }
 
-        // Step A: Whisper ASR
-        const whisperResult = await env.AI.run("@cf/openai/whisper", {
-          audio: [...audioBytes],
-        });
-        const transcription = (whisperResult.text || "").trim();
+        // Step A: Whisper ASR with VAD and anti-hallucination parameters
+        const whisperResult = await runWhisperWithFallback(env, audioBytes);
+        const rawTranscription = (whisperResult.text || whisperResult.transcription || "").trim();
+        const transcription = cleanWhisperTranscript(rawTranscription);
 
-        // Step B: Llama 3.1 Summarization
+        // Step B: Summarization
         let summary = "";
         if (transcription.length > 0) {
           summary = await runSummarization(env, transcription, callTitle);
         } else {
-          summary = "No audible speech detected in this recording.";
+          summary = `## 📋 Executive Summary\nNo clear speech or conversation was detected in this recording. The audio appears to contain silence or background noise only.\n\n## 📝 Key Discussion Points\n- None detected\n\n## ✅ Action Items & Commitments\n- None\n\n## 📅 Dates & Deadlines\n- None`;
         }
 
         return jsonResponse({
-          transcription: transcription,
+          transcription: transcription.length > 0 ? transcription : "(No audible speech detected)",
           summary: summary,
         });
       } catch (err) {
@@ -171,11 +181,128 @@ export default {
 };
 
 /**
+ * Supported Whisper models on Cloudflare Workers AI in order of preference.
+ */
+const WHISPER_MODELS = [
+  "@cf/openai/whisper-large-v3-turbo",
+  "@cf/openai/whisper",
+];
+
+/**
+ * Runs Whisper with VAD, condition_on_previous_text=false, and model fallback.
+ */
+async function runWhisperWithFallback(env, audioBytes) {
+  const fullPayload = {
+    audio: [...audioBytes],
+    vad_filter: true,
+    condition_on_previous_text: false,
+    initial_prompt: "Phone call conversation between two people.",
+    no_speech_threshold: 0.6,
+  };
+
+  let lastError = null;
+  for (const model of WHISPER_MODELS) {
+    try {
+      const res = await env.AI.run(model, fullPayload);
+      if (res && (res.text !== undefined || res.transcription !== undefined)) {
+        return res;
+      }
+    } catch (e) {
+      console.warn(`Whisper ${model} with full options failed: ${e.message}, trying standard options...`);
+      try {
+        const fallbackRes = await env.AI.run(model, {
+          audio: [...audioBytes],
+          vad_filter: true,
+          condition_on_previous_text: false,
+        });
+        if (fallbackRes && (fallbackRes.text !== undefined || fallbackRes.transcription !== undefined)) {
+          return fallbackRes;
+        }
+      } catch (innerE) {
+        lastError = innerE;
+        console.warn(`Whisper ${model} failed (${innerE.message}), trying next model...`);
+      }
+    }
+  }
+  throw lastError || new Error("All Whisper transcription models failed.");
+}
+
+/**
+ * Detects and removes Whisper hallucinations, infinite punctuation loops,
+ * and silence artifacts.
+ */
+function cleanWhisperTranscript(rawText) {
+  if (!rawText || typeof rawText !== "string") return "";
+  let text = rawText.trim();
+  if (!text) return "";
+
+  // 1. Strip repetitive punctuation or dots (e.g. "... ... ... ...")
+  text = text.replace(/(?:\.\s*){3,}/g, "... ");
+  text = text.replace(/(?:\.\.\.\s*){2,}/g, "... ");
+
+  // Check if text has virtually no alphanumeric content (e.g. only dots, dashes, commas)
+  const alphaNumericOnly = text.replace(/[\s\.\,\!\?\-\:\;\(\)\[\]\"\'\…\·\•\*\~\_]/g, "");
+  if (alphaNumericOnly.length < 2) {
+    return "";
+  }
+
+  // 2. Remove consecutive duplicate sentences (e.g. "날 저갈더스타! 날 저갈더스타!")
+  const sentences = text.split(/(?<=[.!?\n])\s+/).filter(s => s.trim().length > 0);
+  if (sentences.length >= 2) {
+    const deduplicated = [];
+    let consecutiveCount = 0;
+    let lastSentenceNorm = "";
+
+    for (const s of sentences) {
+      const norm = s.trim().toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+      if (norm.length > 0 && norm === lastSentenceNorm) {
+        consecutiveCount++;
+        // If repeated more than once, drop it
+        if (consecutiveCount < 2) {
+          deduplicated.push(s.trim());
+        }
+      } else {
+        consecutiveCount = 0;
+        lastSentenceNorm = norm;
+        deduplicated.push(s.trim());
+      }
+    }
+    text = deduplicated.join(" ");
+  }
+
+  // 3. Remove consecutive duplicate words or short phrases (e.g. "Thank you. Thank you. Thank you.")
+  text = text.replace(/\b([a-zA-Z0-9\p{L}]{2,}(?:\s+[a-zA-Z0-9\p{L}]{2,}){0,3})\s+(?:\1\s+){2,}\1\b/gui, "$1");
+
+  // 4. Known Whisper silence/noise hallucinations
+  const lower = text.toLowerCase().trim();
+  const knownHallucinations = [
+    /^\[?\(?(?:music|applause|laughter|silence|cheering|coughing|groan|sigh)\)?\]?$/i,
+    /^(?:subtitles by|translated by|transcript by|captions by|thank you for watching|please subscribe)/i,
+    /^(?:날 저갈더스타|날 저갈더스타!)/i,
+  ];
+  for (const pattern of knownHallucinations) {
+    if (pattern.test(lower)) {
+      return "";
+    }
+  }
+
+  // 5. Final check: if alphanumeric characters count is less than 2, it's silence
+  const finalAlpha = text.replace(/[^\p{L}\p{N}]/gu, "");
+  if (finalAlpha.length < 2) {
+    return "";
+  }
+
+  return text.trim();
+}
+
+/**
  * Runs Meta Llama 3.1 8B Instruct to produce Call Scribe's standard structured summary.
  */
 async function runSummarization(env, transcript, callTitle) {
   const systemPrompt = `You are the AI assistant for Call Scribe, a phone call recording and transcription application.
 Analyze the provided phone call transcript accurately.
+CRITICAL: If the transcript contains only background noise, repeated filler words, corrupted text, or lacks coherent speech, do not invent facts. State clearly in the Executive Summary that no coherent conversation was detected, and write "- None" for all other sections.
+
 You must output a structured markdown summary in the exact format:
 
 ## 📋 Executive Summary

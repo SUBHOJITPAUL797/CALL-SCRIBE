@@ -81,6 +81,7 @@ import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.ui.text.style.TextDecoration
 import com.example.data.AutoAnalyzeMode
 import com.example.data.CallerActionItem
@@ -1813,6 +1814,7 @@ fun RecordingCard(
     onOpenCallerProfile: (() -> Unit)? = null
 ) {
     var expanded by remember { mutableStateOf(false) }
+    var showMenu by remember { mutableStateOf(false) }
     val dateFormat = remember { SimpleDateFormat("MMM dd, yyyy - HH:mm", Locale.getDefault()) }
     val metadata = remember(recording.title) { CallMetadataParser.parse(recording.title) }
     val actionItems = remember(recording.decodedSummary) { CommitmentExtractor.extractActionItems(recording.decodedSummary) }
@@ -1860,24 +1862,40 @@ fun RecordingCard(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
                             Text(
                                 text = dateFormat.format(Date(recording.timestamp)),
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.Bold,
                                 color = Color.DarkGray
                             )
-                            metadata.contactOrNumber?.let {
-                                Text("•", style = MaterialTheme.typography.labelSmall, color = Color.DarkGray)
-                                Text(it, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color(0xFF6366F1))
-                            }
                             when (metadata.direction) {
                                 com.example.data.CallDirection.INCOMING -> Text("↙ In", style = MaterialTheme.typography.labelSmall, color = Color(0xFF22C55E), fontWeight = FontWeight.Black)
                                 com.example.data.CallDirection.OUTGOING -> Text("↗ Out", style = MaterialTheme.typography.labelSmall, color = Color(0xFFF59E0B), fontWeight = FontWeight.Black)
                                 else -> {}
                             }
+                            // Only display contactOrNumber if distinct from cleanTitle
+                            val distinctContact = metadata.contactOrNumber?.takeIf {
+                                it.isNotBlank() && it != metadata.cleanTitle && !metadata.cleanTitle.contains(it)
+                            }
+                            if (distinctContact != null) {
+                                Text("•", style = MaterialTheme.typography.labelSmall, color = Color.DarkGray)
+                                Text(
+                                    text = distinctContact,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF6366F1),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         }
                     }
+                    // Organized Action Buttons
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         // Caller Profile button
                         if (onOpenCallerProfile != null) {
@@ -1890,7 +1908,7 @@ fun RecordingCard(
                             ) {
                                 Icon(Icons.Default.Person, contentDescription = "Caller Profile", tint = Color.Black, modifier = Modifier.size(18.dp))
                             }
-                            Spacer(modifier = Modifier.width(4.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
                         }
                         // Chat button
                         IconButton(
@@ -1902,35 +1920,58 @@ fun RecordingCard(
                         ) {
                             Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = "Chat with Call", tint = Color.Black, modifier = Modifier.size(18.dp))
                         }
-                        Spacer(modifier = Modifier.width(4.dp))
-                        IconButton(
-                            onClick = onShare,
-                            modifier = Modifier
-                                .background(Color.White, CircleShape)
-                                .border(2.dp, Color.Black, CircleShape)
-                                .size(36.dp)
-                        ) {
-                            Icon(Icons.Default.Share, contentDescription = "Share", tint = Color.Black, modifier = Modifier.size(18.dp))
-                        }
-                        Spacer(modifier = Modifier.width(4.dp))
-                        IconButton(
-                            onClick = onAddToCalendar,
-                            modifier = Modifier
-                                .background(MaterialTheme.colorScheme.primary, CircleShape)
-                                .border(2.dp, Color.Black, CircleShape)
-                                .size(36.dp)
-                        ) {
-                            Icon(Icons.Default.CalendarToday, contentDescription = "Add to Calendar", tint = Color.Black, modifier = Modifier.size(16.dp))
-                        }
-                        Spacer(modifier = Modifier.width(4.dp))
-                        IconButton(
-                            onClick = onDelete,
-                            modifier = Modifier
-                                .background(MaterialTheme.colorScheme.secondary, CircleShape)
-                                .border(2.dp, Color.Black, CircleShape)
-                                .size(36.dp)
-                        ) {
-                            Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.Black, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+
+                        // More Options Dropdown Menu (Share, Add to Calendar, Delete)
+                        Box {
+                            IconButton(
+                                onClick = { showMenu = true },
+                                modifier = Modifier
+                                    .background(Color.White, CircleShape)
+                                    .border(2.dp, Color.Black, CircleShape)
+                                    .size(36.dp)
+                            ) {
+                                Icon(Icons.Default.MoreVert, contentDescription = "More Actions", tint = Color.Black, modifier = Modifier.size(18.dp))
+                            }
+                            DropdownMenu(
+                                expanded = showMenu,
+                                onDismissRequest = { showMenu = false },
+                                modifier = Modifier
+                                    .background(MaterialTheme.colorScheme.surface)
+                                    .border(2.dp, Color.Black, RoundedCornerShape(12.dp))
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("Share Call", fontWeight = FontWeight.Bold) },
+                                    onClick = {
+                                        showMenu = false
+                                        onShare()
+                                    },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Share, contentDescription = null, tint = Color.Black)
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Add to Calendar", fontWeight = FontWeight.Bold) },
+                                    onClick = {
+                                        showMenu = false
+                                        onAddToCalendar()
+                                    },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.CalendarToday, contentDescription = null, tint = Color.Black)
+                                    }
+                                )
+                                HorizontalDivider(thickness = 1.dp, color = Color.LightGray)
+                                DropdownMenuItem(
+                                    text = { Text("Delete Recording", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.error) },
+                                    onClick = {
+                                        showMenu = false
+                                        onDelete()
+                                    },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+                                    }
+                                )
+                            }
                         }
                     }
                 }
