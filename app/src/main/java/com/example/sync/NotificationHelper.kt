@@ -56,75 +56,75 @@ object NotificationHelper {
         dates: List<String>,
         recordingId: Int
     ) {
-        if (actionItems.isEmpty() && dates.isEmpty()) return
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ActivityCompat.checkSelfPermission(
-                    context,
-                    Manifest.permission.POST_NOTIFICATIONS
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-                return
-            }
-        }
-
-        createNotificationChannels(context)
-
-        val cleanTitle = CallMetadataParser.cleanCallTitle(callTitle)
-        val title = "📌 Action Items Detected: $cleanTitle"
-
-        val summaryText = buildString {
-            if (actionItems.isNotEmpty()) append("${actionItems.size} task(s) ")
-            if (dates.isNotEmpty()) append("${dates.size} date(s)")
-        }.trim()
-
-        val bigText = buildString {
-            if (actionItems.isNotEmpty()) {
-                append("✅ Action Items:\n")
-                actionItems.forEach { item ->
-                    append(" • $item\n")
-                }
-            }
-            if (dates.isNotEmpty()) {
-                if (actionItems.isNotEmpty()) append("\n")
-                append("📅 Dates & Deadlines:\n")
-                dates.forEach { date ->
-                    append(" • $date\n")
-                }
-            }
-        }
-        val safeBigText = bigText.take(4000)
-
-        val intent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-
-        val notifId = (2000 + (recordingId % 100000)).coerceAtLeast(1)
-
-        val pendingIntent = PendingIntent.getActivity(
-            context,
-            notifId,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val iconRes = context.applicationInfo.icon.takeIf { it != 0 }
-            ?: android.R.drawable.ic_popup_reminder
-
-        val notification = NotificationCompat.Builder(context, CHANNEL_COMMITMENTS)
-            .setSmallIcon(iconRes)
-            .setContentTitle(title)
-            .setContentText(summaryText)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(safeBigText))
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setAutoCancel(true)
-            .setContentIntent(pendingIntent)
-            .build()
-
         try {
+            if (actionItems.isEmpty() && dates.isEmpty()) return
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                if (ActivityCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.POST_NOTIFICATIONS
+                    ) != PackageManager.PERMISSION_GRANTED
+                ) {
+                    return
+                }
+            }
+
+            createNotificationChannels(context)
+
+            val cleanTitle = CallMetadataParser.cleanCallTitle(callTitle)
+            val title = "📌 Action Items Detected: $cleanTitle"
+
+            val summaryText = buildString {
+                if (actionItems.isNotEmpty()) append("${actionItems.size} task(s) ")
+                if (dates.isNotEmpty()) append("${dates.size} date(s)")
+            }.trim()
+
+            val bigText = buildString {
+                if (actionItems.isNotEmpty()) {
+                    append("✅ Action Items:\n")
+                    actionItems.forEach { item ->
+                        append(" • $item\n")
+                    }
+                }
+                if (dates.isNotEmpty()) {
+                    if (actionItems.isNotEmpty()) append("\n")
+                    append("📅 Dates & Deadlines:\n")
+                    dates.forEach { date ->
+                        append(" • $date\n")
+                    }
+                }
+            }
+            val safeBigText = bigText.take(4000)
+
+            val intent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+
+            val notifId = (2000 + (recordingId % 100000)).coerceAtLeast(1)
+
+            val pendingIntent = PendingIntent.getActivity(
+                context,
+                notifId,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            // Must use a safe 2D small icon (never an adaptive-icon XML) to prevent RemoteServiceException
+            val iconRes = android.R.drawable.ic_popup_reminder
+
+            val notification = NotificationCompat.Builder(context, CHANNEL_COMMITMENTS)
+                .setSmallIcon(iconRes)
+                .setContentTitle(title)
+                .setContentText(summaryText)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(safeBigText))
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+                .build()
+
             NotificationManagerCompat.from(context).notify(notifId, notification)
-        } catch (_: SecurityException) {
-        } catch (_: Exception) {
+        } catch (t: Throwable) {
+            android.util.Log.w("CallScribeNotif", "Could not show commitment notification: ${t.localizedMessage}", t)
         }
     }
 
@@ -134,51 +134,51 @@ object NotificationHelper {
         recordingId: Int,
         isAutoAnalyzed: Boolean
     ) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ActivityCompat.checkSelfPermission(
-                    context,
-                    Manifest.permission.POST_NOTIFICATIONS
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-                return
-            }
-        }
-
-        createNotificationChannels(context)
-
-        val cleanTitle = CallMetadataParser.cleanCallTitle(callTitle)
-        val title = if (isAutoAnalyzed) "⚡ Call Analyzed: $cleanTitle" else "📞 New Call: $cleanTitle"
-        val text = if (isAutoAnalyzed) "Full transcription and AI insights are ready." else "New call recording detected. Tap to analyze."
-
-        val notifId = (1000 + (recordingId % 100000)).coerceAtLeast(1)
-
-        val intent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-
-        val pendingIntent = PendingIntent.getActivity(
-            context,
-            notifId,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val iconRes = context.applicationInfo.icon.takeIf { it != 0 }
-            ?: android.R.drawable.stat_notify_chat
-
-        val notification = NotificationCompat.Builder(context, CHANNEL_SYNC)
-            .setSmallIcon(iconRes)
-            .setContentTitle(title)
-            .setContentText(text)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setAutoCancel(true)
-            .setContentIntent(pendingIntent)
-            .build()
-
         try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                if (ActivityCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.POST_NOTIFICATIONS
+                    ) != PackageManager.PERMISSION_GRANTED
+                ) {
+                    return
+                }
+            }
+
+            createNotificationChannels(context)
+
+            val cleanTitle = CallMetadataParser.cleanCallTitle(callTitle)
+            val title = if (isAutoAnalyzed) "⚡ Call Analyzed: $cleanTitle" else "📞 New Call: $cleanTitle"
+            val text = if (isAutoAnalyzed) "Full transcription and AI insights are ready." else "New call recording detected. Tap to analyze."
+
+            val notifId = (1000 + (recordingId % 100000)).coerceAtLeast(1)
+
+            val intent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+
+            val pendingIntent = PendingIntent.getActivity(
+                context,
+                notifId,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            // Must use a safe 2D small icon (never an adaptive-icon XML) to prevent RemoteServiceException
+            val iconRes = android.R.drawable.stat_notify_chat
+
+            val notification = NotificationCompat.Builder(context, CHANNEL_SYNC)
+                .setSmallIcon(iconRes)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+                .build()
+
             NotificationManagerCompat.from(context).notify(notifId, notification)
-        } catch (_: SecurityException) {
-        } catch (_: Exception) {
+        } catch (t: Throwable) {
+            android.util.Log.w("CallScribeNotif", "Could not show new call notification: ${t.localizedMessage}", t)
         }
     }
 }

@@ -199,6 +199,7 @@ fun CallScribeApp(viewModel: CallViewModel) {
     val isDownloadingUpdate by viewModel.isDownloadingUpdate.collectAsStateWithLifecycle()
     val downloadProgress by viewModel.downloadProgress.collectAsStateWithLifecycle()
     val updateStatusMessage by viewModel.updateStatusMessage.collectAsStateWithLifecycle()
+    val analyzingRecordingId by viewModel.analyzingRecordingId.collectAsStateWithLifecycle()
 
     // Audio Player state
     val playingRecordingId by viewModel.audioPlayer.playingRecordingId.collectAsStateWithLifecycle()
@@ -368,15 +369,40 @@ fun CallScribeApp(viewModel: CallViewModel) {
                                 color = Color.Black,
                                 modifier = Modifier.weight(1f)
                             )
-                            Button(
-                                onClick = {
-                                    viewModel.reanalyzeRecording(context, chatRec)
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = Color.Black),
-                                shape = RoundedCornerShape(6.dp),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-                            ) {
-                                Text("⚡ Transcribe", style = MaterialTheme.typography.labelSmall, color = Color.White, fontWeight = FontWeight.Bold)
+                            val isAnalyzingChatRec = (analyzingRecordingId == chatRec.id)
+                            if (isAnalyzingChatRec) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                ) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(14.dp),
+                                        strokeWidth = 2.dp,
+                                        color = Color.Black
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        "Analyzing...",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.Black
+                                    )
+                                }
+                            } else {
+                                Button(
+                                    onClick = {
+                                        try {
+                                            viewModel.reanalyzeRecording(context, chatRec)
+                                        } catch (t: Throwable) {
+                                            Toast.makeText(context, "Cannot start analysis", Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color.Black),
+                                    shape = RoundedCornerShape(6.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                ) {
+                                    Text("⚡ Transcribe", style = MaterialTheme.typography.labelSmall, color = Color.White, fontWeight = FontWeight.Bold)
+                                }
                             }
                         }
                     }
@@ -1124,7 +1150,13 @@ fun CallScribeApp(viewModel: CallViewModel) {
                         )
                         Spacer(modifier = Modifier.height(12.dp))
                         Button(
-                            onClick = { viewModel.startSyncWithLimit(context, totalCount) },
+                            onClick = {
+                                try {
+                                    viewModel.startSyncWithLimit(context, totalCount)
+                                } catch (t: Throwable) {
+                                    Toast.makeText(context, "Cannot start sync", Toast.LENGTH_SHORT).show()
+                                }
+                            },
                             modifier = Modifier.fillMaxWidth(),
                             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                             shape = RoundedCornerShape(8.dp),
@@ -1142,7 +1174,13 @@ fun CallScribeApp(viewModel: CallViewModel) {
                         Spacer(modifier = Modifier.height(16.dp))
                         if (pendingCount >= 20) {
                             Button(
-                                onClick = { viewModel.startSyncWithLimit(context, 20) },
+                                onClick = {
+                                    try {
+                                        viewModel.startSyncWithLimit(context, 20)
+                                    } catch (t: Throwable) {
+                                        Toast.makeText(context, "Cannot start sync", Toast.LENGTH_SHORT).show()
+                                    }
+                                },
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
                                 shape = RoundedCornerShape(8.dp),
@@ -1154,7 +1192,13 @@ fun CallScribeApp(viewModel: CallViewModel) {
                         }
                         if (pendingCount >= 50) {
                             Button(
-                                onClick = { viewModel.startSyncWithLimit(context, 50) },
+                                onClick = {
+                                    try {
+                                        viewModel.startSyncWithLimit(context, 50)
+                                    } catch (t: Throwable) {
+                                        Toast.makeText(context, "Cannot start sync", Toast.LENGTH_SHORT).show()
+                                    }
+                                },
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
                                 shape = RoundedCornerShape(8.dp),
@@ -1165,7 +1209,13 @@ fun CallScribeApp(viewModel: CallViewModel) {
                             Spacer(modifier = Modifier.height(8.dp))
                         }
                         Button(
-                            onClick = { viewModel.startSyncWithLimit(context, pendingCount) },
+                            onClick = {
+                                try {
+                                    viewModel.startSyncWithLimit(context, pendingCount)
+                                } catch (t: Throwable) {
+                                    Toast.makeText(context, "Cannot start sync", Toast.LENGTH_SHORT).show()
+                                }
+                            },
                             modifier = Modifier.fillMaxWidth(),
                             colors = ButtonDefaults.buttonColors(containerColor = Color.White),
                             shape = RoundedCornerShape(8.dp),
@@ -1337,7 +1387,10 @@ fun CallScribeApp(viewModel: CallViewModel) {
                         )
                         Spacer(modifier = Modifier.height(6.dp))
                         LinearProgressIndicator(
-                            progress = { downloadProgress },
+                            progress = {
+                                if (downloadProgress.isNaN() || downloadProgress.isInfinite()) 0f
+                                else downloadProgress.coerceIn(0f, 1f)
+                            },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(8.dp)
@@ -1690,7 +1743,10 @@ fun CallScribeApp(viewModel: CallViewModel) {
                                 }
                                 Spacer(modifier = Modifier.height(12.dp))
                                 LinearProgressIndicator(
-                                    progress = { if (syncTotalCount > 0) syncProgress else 0f },
+                                    progress = {
+                                        val p = if (syncTotalCount > 0) syncProgress else 0f
+                                        if (p.isNaN() || p.isInfinite()) 0f else p.coerceIn(0f, 1f)
+                                    },
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .height(10.dp)
@@ -1791,8 +1847,13 @@ fun CallScribeApp(viewModel: CallViewModel) {
                                 clipboard.setText(AnnotatedString(recording.decodedTranscription))
                                 Toast.makeText(context, "Transcript copied!", Toast.LENGTH_SHORT).show()
                             },
+                            isAnalyzing = (analyzingRecordingId == recording.id),
                             onReanalyze = {
-                                viewModel.reanalyzeRecording(context, recording)
+                                try {
+                                    viewModel.reanalyzeRecording(context, recording)
+                                } catch (t: Throwable) {
+                                    Toast.makeText(context, "Cannot start analysis", Toast.LENGTH_SHORT).show()
+                                }
                             },
                             onToggleActionItem = { itemText ->
                                 viewModel.toggleActionItem(recording.id, itemText)
@@ -1923,6 +1984,7 @@ fun RecordingCard(
     onShare: () -> Unit,
     onCopySummary: () -> Unit,
     onCopyTranscript: () -> Unit,
+    isAnalyzing: Boolean = false,
     onReanalyze: () -> Unit = {},
     onToggleActionItem: (String) -> Unit = {},
     isActionItemCompleted: (String) -> Boolean = { false },
@@ -2209,13 +2271,55 @@ fun RecordingCard(
                             recording.decodedTranscription.isBlank()
                         if (needsAiTranscription) {
                             Spacer(modifier = Modifier.height(10.dp))
-                            Button(
-                                onClick = onReanalyze,
-                                colors = ButtonDefaults.buttonColors(containerColor = Color.Black),
-                                shape = RoundedCornerShape(8.dp),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Text("⚡ Transcribe & Analyze Call", fontWeight = FontWeight.Bold, color = Color.White)
+                            if (isAnalyzing) {
+                                Surface(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .border(2.dp, Color.Black, RoundedCornerShape(8.dp)),
+                                    color = MaterialTheme.colorScheme.primaryContainer,
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(12.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.Center
+                                        ) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(16.dp),
+                                                strokeWidth = 2.5.dp,
+                                                color = Color.Black
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                "⚡ Transcribing & Analyzing with AI...",
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color.Black,
+                                                style = MaterialTheme.typography.labelLarge
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        LinearProgressIndicator(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(6.dp)
+                                                .border(1.dp, Color.Black, RoundedCornerShape(3.dp)),
+                                            color = MaterialTheme.colorScheme.secondary,
+                                            trackColor = Color.White
+                                        )
+                                    }
+                                }
+                            } else {
+                                Button(
+                                    onClick = onReanalyze,
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color.Black),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("⚡ Transcribe & Analyze Call", fontWeight = FontWeight.Bold, color = Color.White)
+                                }
                             }
                         }
                     }
