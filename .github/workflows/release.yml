@@ -52,7 +52,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: release_assets/*.apk
+          files: release_assets/CallScribe-${{ github.ref_name || 'latest' }}.apk
           generate_release_notes: true
           draft: false
           prerelease: false

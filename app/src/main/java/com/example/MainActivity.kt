@@ -61,6 +61,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.CheckCircle
@@ -252,9 +253,22 @@ fun CallScribeApp(viewModel: CallViewModel) {
         }
     }
 
+    var crashReportToDisplay by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) {
+        val previousCrash = com.example.CallScribeApplication.getLastCrashReport(context)
+        if (!previousCrash.isNullOrBlank()) {
+            crashReportToDisplay = previousCrash
+        }
+    }
+
     LaunchedEffect(updateStatusMessage) {
         updateStatusMessage?.let { msg ->
-            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+            try {
+                Toast.makeText(context.applicationContext, msg, Toast.LENGTH_SHORT).show()
+            } catch (t: Throwable) {
+                android.util.Log.e("CallScribe", "Toast failed: ${t.localizedMessage}")
+            }
             viewModel.clearUpdateStatusMessage()
         }
     }
@@ -535,6 +549,74 @@ fun CallScribeApp(viewModel: CallViewModel) {
                     border = BorderStroke(2.dp, Color.Black)
                 ) {
                     Text("Close", fontWeight = FontWeight.Bold, color = Color.Black)
+                }
+            },
+            shape = RoundedCornerShape(16.dp),
+            containerColor = MaterialTheme.colorScheme.surface,
+            modifier = Modifier.border(3.dp, Color.Black, RoundedCornerShape(16.dp))
+        )
+    }
+
+    // Crash & Error Diagnostics Dialog
+    if (crashReportToDisplay != null) {
+        val report = crashReportToDisplay!!
+        AlertDialog(
+            onDismissRequest = {
+                com.example.CallScribeApplication.clearCrashReport(context)
+                crashReportToDisplay = null
+            },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Error, contentDescription = null, tint = Color.Red, modifier = Modifier.size(24.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("App Error Log", fontWeight = FontWeight.Black, color = Color.Black)
+                }
+            },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+                    Text(
+                        text = "A crash or error was caught and logged. You can copy this report and paste it to the developer:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.DarkGray
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    SelectionContainer {
+                        Text(
+                            text = report,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            color = Color.Black,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0xFFF3F4F6), RoundedCornerShape(8.dp))
+                                .border(1.dp, Color.LightGray, RoundedCornerShape(8.dp))
+                                .padding(8.dp)
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        try {
+                            clipboard.setText(AnnotatedString(report))
+                            Toast.makeText(context.applicationContext, "Error log copied! Paste it to developer.", Toast.LENGTH_LONG).show()
+                        } catch (_: Throwable) {}
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color.Black),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("📋 Copy Error Log", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        com.example.CallScribeApplication.clearCrashReport(context)
+                        crashReportToDisplay = null
+                    }
+                ) {
+                    Text("Dismiss", color = Color.Black, fontWeight = FontWeight.Bold)
                 }
             },
             shape = RoundedCornerShape(16.dp),
@@ -2304,16 +2386,21 @@ fun RecordingCard(
                                         LinearProgressIndicator(
                                             modifier = Modifier
                                                 .fillMaxWidth()
-                                                .height(6.dp)
-                                                .border(1.dp, Color.Black, RoundedCornerShape(3.dp)),
+                                                .height(6.dp),
                                             color = MaterialTheme.colorScheme.secondary,
-                                            trackColor = Color.White
+                                            trackColor = Color(0xFFE5E7EB)
                                         )
                                     }
                                 }
                             } else {
                                 Button(
-                                    onClick = onReanalyze,
+                                    onClick = {
+                                        try {
+                                            onReanalyze()
+                                        } catch (t: Throwable) {
+                                            android.util.Log.e("CallScribe", "Error starting reanalysis: ${t.localizedMessage}", t)
+                                        }
+                                    },
                                     colors = ButtonDefaults.buttonColors(containerColor = Color.Black),
                                     shape = RoundedCornerShape(8.dp),
                                     modifier = Modifier.fillMaxWidth()

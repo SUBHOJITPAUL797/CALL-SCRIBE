@@ -819,14 +819,19 @@ class CallViewModel(
     }
 
     fun startSyncWithLimit(context: Context, limit: Int) {
+        val appContext = context.applicationContext
         try {
             val treeUri = selectedFolderForLimit.value ?: return
             selectedFolderForLimit.value = null
 
-            if (isSyncing.value) return
-            val appContext = context.applicationContext
+            val handler = kotlinx.coroutines.CoroutineExceptionHandler { _, throwable ->
+                android.util.Log.e("CallScribe", "Sync coroutine uncaught error: ${throwable.localizedMessage}", throwable)
+                com.example.CallScribeApplication.recordCrash(appContext, Thread.currentThread(), throwable)
+                syncStatus.value = "Sync failed: ${throwable.localizedMessage ?: throwable.javaClass.simpleName}"
+                isSyncing.value = false
+            }
 
-            syncJob = viewModelScope.launch {
+            syncJob = viewModelScope.launch(handler) {
                 try {
                     isSyncing.value = true
                     val modeLabel = preferredEngine.value.displayName
@@ -967,6 +972,7 @@ class CallViewModel(
             }
         } catch (t: Throwable) {
             android.util.Log.e("CallScribe", "Failed to start sync: ${t.localizedMessage}", t)
+            com.example.CallScribeApplication.recordCrash(appContext, Thread.currentThread(), t)
             syncStatus.value = "Could not start sync: ${t.localizedMessage ?: "Unexpected error"}"
             isSyncing.value = false
         }
@@ -1260,6 +1266,7 @@ class CallViewModel(
     }
 
     fun reanalyzeRecording(context: Context, recording: Recording) {
+        val appContext = context.applicationContext
         try {
             val uriStr = recording.sourceUri
             if (uriStr.isNullOrBlank()) {
@@ -1277,7 +1284,14 @@ class CallViewModel(
                 CallMetadataParser.cleanCallTitle(recording.title)
             } catch (_: Throwable) { recording.title }
 
-            viewModelScope.launch {
+            val handler = kotlinx.coroutines.CoroutineExceptionHandler { _, throwable ->
+                android.util.Log.e("CallScribe", "reanalyzeRecording coroutine uncaught error: ${throwable.localizedMessage}", throwable)
+                com.example.CallScribeApplication.recordCrash(appContext, Thread.currentThread(), throwable)
+                updateStatusMessage.value = "⚠️ Analysis error: ${throwable.localizedMessage ?: throwable.javaClass.simpleName}"
+                analyzingRecordingId.value = null
+            }
+
+            viewModelScope.launch(handler) {
                 analyzingRecordingId.value = recording.id
                 updateStatusMessage.value = "Analyzing '$cleanTitle'..."
                 android.util.Log.i("CallScribe", "Starting analysis for id=${recording.id}, title='${recording.title}', uri=$uriStr, engine=${preferredEngine.value}")
@@ -1288,20 +1302,20 @@ class CallViewModel(
                             try {
                                 val uri = Uri.parse(uriStr)
                                 val fileSize = try {
-                                    context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: 0L
+                                    appContext.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: 0L
                                 } catch (e: Throwable) {
                                     android.util.Log.w("CallScribe", "openFileDescriptor statSize failed: ${e.localizedMessage}")
                                     0L
                                 }
                                 val mime = try {
-                                    context.contentResolver.getType(uri) ?: "audio/mp3"
+                                    appContext.contentResolver.getType(uri) ?: "audio/mp3"
                                 } catch (e: Throwable) {
                                     android.util.Log.w("CallScribe", "contentResolver.getType failed: ${e.localizedMessage}")
                                     "audio/mp3"
                                 }
 
                                 processAudioFile(
-                                    context = context.applicationContext,
+                                    context = appContext,
                                     uri = uri,
                                     fileName = recording.title,
                                     mimeType = mime,
@@ -1337,7 +1351,7 @@ class CallViewModel(
                                 val dates = CommitmentExtractor.extractDates(updated.decodedSummary)
                                 if (actions.isNotEmpty() || dates.isNotEmpty()) {
                                     NotificationHelper.notifyCommitments(
-                                        context = context.applicationContext,
+                                        context = appContext,
                                         callTitle = updated.title,
                                         actionItems = actions,
                                         dates = dates,
@@ -1366,6 +1380,7 @@ class CallViewModel(
                 } catch (t: Throwable) {
                     if (t !is kotlinx.coroutines.CancellationException) {
                         android.util.Log.e("CallScribe", "Unexpected error in reanalyzeRecording: ${t.localizedMessage}", t)
+                        com.example.CallScribeApplication.recordCrash(appContext, Thread.currentThread(), t)
                         updateStatusMessage.value = "Could not analyze: ${t.localizedMessage ?: "Unexpected error"}"
                     }
                 } finally {
@@ -1374,7 +1389,9 @@ class CallViewModel(
             }
         } catch (t: Throwable) {
             android.util.Log.e("CallScribe", "Fatal guard caught error in reanalyzeRecording: ${t.localizedMessage}", t)
+            com.example.CallScribeApplication.recordCrash(appContext, Thread.currentThread(), t)
             updateStatusMessage.value = "Could not start analysis: ${t.localizedMessage ?: "Error"}"
+            analyzingRecordingId.value = null
         }
     }
 
