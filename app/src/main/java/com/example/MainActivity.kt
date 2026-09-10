@@ -43,6 +43,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.data.Recording
 import com.example.data.PreferredEngine
+import com.example.data.SpokenLanguage
 import com.example.di.DefaultAppContainer
 import com.example.ui.CallViewModel
 import com.example.ui.CallViewModelFactory
@@ -209,6 +210,7 @@ fun CallScribeApp(viewModel: CallViewModel) {
     var cloudflareTestResult by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
     var isTestingCloudflare by remember { mutableStateOf(false) }
     var selectedEngine by remember { mutableStateOf(PreferredEngine.AUTO) }
+    var selectedLanguage by remember { mutableStateOf(SpokenLanguage.AUTO) }
 
     LaunchedEffect(showApiKeyDialog) {
         if (showApiKeyDialog) {
@@ -217,6 +219,7 @@ fun CallScribeApp(viewModel: CallViewModel) {
             enteredCloudflareUrl = viewModel.getCloudflareUrl()
             enteredCloudflareToken = viewModel.getCloudflareToken()
             selectedEngine = viewModel.preferredEngine.value
+            selectedLanguage = viewModel.spokenLanguage.value
             apiKeyTestResult = null
             nvidiaKeyTestResult = null
             cloudflareTestResult = null
@@ -532,6 +535,55 @@ fun CallScribeApp(viewModel: CallViewModel) {
                     HorizontalDivider(color = Color.LightGray)
                     Spacer(Modifier.height(12.dp))
 
+                    // ── Spoken Language Section ─────────────────────────────
+                    Text("🗣️ Spoken Language (Bengali / Hindi / English)", fontWeight = FontWeight.Black, color = Color.Black, style = MaterialTheme.typography.labelLarge)
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = "Prevents Whisper from transcribing into Korean, Cyrillic, or foreign scripts:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.DarkGray
+                    )
+                    Spacer(Modifier.height(6.dp))
+
+                    for (lang in SpokenLanguage.values()) {
+                        val isSelected = (selectedLanguage == lang)
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp)
+                                .clickable { selectedLanguage = lang },
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (isSelected) Color(0xFFE0F2FE) else Color.White,
+                            border = BorderStroke(if (isSelected) 2.dp else 1.dp, if (isSelected) Color(0xFF0284C7) else Color.LightGray)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = isSelected,
+                                    onClick = { selectedLanguage = lang },
+                                    colors = RadioButtonDefaults.colors(selectedColor = Color(0xFF0284C7))
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Column {
+                                    Text(lang.displayName, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
+                                    val desc = when (lang) {
+                                        SpokenLanguage.AUTO -> "Auto-detect with Bengali, Hindi & English context"
+                                        SpokenLanguage.BENGALI -> "বাংলা (Directly forces Bengali Whisper transcription)"
+                                        SpokenLanguage.HINDI -> "हिन्दी (Directly forces Hindi Whisper transcription)"
+                                        SpokenLanguage.ENGLISH -> "English (Directly forces English Whisper transcription)"
+                                    }
+                                    Text(desc, style = MaterialTheme.typography.bodySmall, color = Color.DarkGray)
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(12.dp))
+                    HorizontalDivider(color = Color.LightGray)
+                    Spacer(Modifier.height(12.dp))
+
                     // ── Cloudflare Workers AI Section ────────────────────────
                     Text("☁️ Cloudflare Workers AI (Whisper + Llama 3.1)", fontWeight = FontWeight.Black, color = Color.Black, style = MaterialTheme.typography.labelLarge)
                     Spacer(Modifier.height(2.dp))
@@ -757,7 +809,8 @@ fun CallScribeApp(viewModel: CallViewModel) {
                             cloudflareUrl = enteredCloudflareUrl,
                             cloudflareToken = enteredCloudflareToken,
                             nvidiaKey = enteredNvidiaKey,
-                            geminiKey = enteredApiKey
+                            geminiKey = enteredApiKey,
+                            language = selectedLanguage
                         )
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),

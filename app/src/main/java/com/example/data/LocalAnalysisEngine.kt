@@ -5,18 +5,31 @@ import java.util.Locale
 object LocalAnalysisEngine {
 
     private val actionKeywords = listOf(
+        // English
         "will", "shall", "need to", "needs to", "have to", "has to", "must",
         "should", "let's", "let us", "please", "agreed", "agree to", "agreed to",
         "follow up", "schedule", "send", "email", "call back", "remind",
-        "deadline", "prepare", "finish", "complete", "check with", "confirm"
+        "deadline", "prepare", "finish", "complete", "check with", "confirm",
+        // Bengali
+        "করব", "করবো", "পাঠাব", "পাঠাবো", "দেব", "দেবো", "ফোন করব", "কথা বলব", "হাঁ", "ঠিক আছে",
+        "করতে হবে", "যেতে হবে", "জানাব", "জানাবো",
+        // Hindi
+        "करूंगा", "करूंगी", "करेंगे", "भेज दूंगा", "भेज देंगे", "बात करेंगे", "फोन करूंगा", "फोन करेंगे",
+        "करना होगा", "करना पड़ेगा", "बताना"
     )
 
     private val dateKeywords = listOf(
+        // English
         "today", "tomorrow", "yesterday", "tonight", "monday", "tuesday", "wednesday",
         "thursday", "friday", "saturday", "sunday", "morning", "afternoon", "evening",
         "next week", "this week", "next month", "o'clock", "am", "pm", "january",
         "february", "march", "april", "may", "june", "july", "august", "september",
-        "october", "november", "december"
+        "october", "november", "december",
+        // Bengali
+        "আজ", "আজকে", "কাল", "কালকে", "পরশু", "সকালে", "বিকালে", "সন্ধ্যায়", "রাতে",
+        "সোমবার", "মঙ্গলবার", "বুধবার", "বৃহস্পতিবার", "শুক্রবার", "শনিবার", "রবিবার",
+        // Hindi
+        "आज", "कल", "परसों", "सुबह", "दोपहर", "शाम", "रात"
     )
 
     private val monetaryPattern = Regex("""(?i)(?:[$€£₹]|rs\.?|usd|inr|dollars?|bucks?)\s*\d+(?:,\d+)*(?:\.\d+)?|\d+(?:,\d+)*(?:\.\d+)?\s*(?:[$€£₹]|rs\.?|usd|inr|dollars?|bucks?)""")

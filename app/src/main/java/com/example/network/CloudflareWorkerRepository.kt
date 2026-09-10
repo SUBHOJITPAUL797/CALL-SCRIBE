@@ -114,7 +114,8 @@ class CloudflareWorkerRepository(
     suspend fun transcribeAudio(
         audioBytes: ByteArray,
         fileName: String,
-        mimeType: String
+        mimeType: String,
+        language: String = "auto"
     ): Result<String> = withContext(Dispatchers.IO) {
         val baseUrl = getCleanUrl()
         if (!isConfigured()) {
@@ -126,7 +127,8 @@ class CloudflareWorkerRepository(
         val requestBody = audioBytes.toRequestBody(mediaType)
 
         val encodedTitle = urlEncode(fileName)
-        val url = "$baseUrl/transcribe?title=$encodedTitle"
+        val langParam = if (language.isNotBlank() && language != "auto") "&lang=$language" else ""
+        val url = "$baseUrl/transcribe?title=$encodedTitle$langParam"
 
         val request = Request.Builder()
             .url(url)
@@ -136,6 +138,7 @@ class CloudflareWorkerRepository(
                 }
                 addHeader("X-Call-Title-Encoded", encodedTitle)
                 addHeader("X-Call-Title", sanitizeHeaderValue(fileName))
+                addHeader("X-Call-Language", language)
             }
             .post(requestBody)
             .build()
@@ -225,7 +228,8 @@ class CloudflareWorkerRepository(
     suspend fun analyzeAudio(
         audioBytes: ByteArray,
         fileName: String,
-        mimeType: String
+        mimeType: String,
+        language: String = "auto"
     ): Result<Pair<String, String>> = withContext(Dispatchers.IO) {
         val baseUrl = getCleanUrl()
         if (!isConfigured()) {
@@ -237,7 +241,8 @@ class CloudflareWorkerRepository(
         val requestBody = audioBytes.toRequestBody(mediaType)
 
         val encodedTitle = urlEncode(fileName)
-        val url = "$baseUrl/analyze?title=$encodedTitle"
+        val langParam = if (language.isNotBlank() && language != "auto") "&lang=$language" else ""
+        val url = "$baseUrl/analyze?title=$encodedTitle$langParam"
 
         val request = Request.Builder()
             .url(url)
@@ -247,6 +252,7 @@ class CloudflareWorkerRepository(
                 }
                 addHeader("X-Call-Title-Encoded", encodedTitle)
                 addHeader("X-Call-Title", sanitizeHeaderValue(fileName))
+                addHeader("X-Call-Language", language)
             }
             .post(requestBody)
             .build()

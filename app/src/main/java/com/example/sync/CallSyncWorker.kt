@@ -101,6 +101,7 @@ class CallSyncWorker(
                     val hasAnyEngine = geminiRepo.isApiKeyConfigured() || nvidiaRepo.isApiKeyConfigured() || cloudflareRepo.isConfigured() || preferredEngine == PreferredEngine.ON_DEVICE
 
                     if (shouldAutoAnalyze && hasAnyEngine) {
+                        val spokenLanguage = prefs.getSpokenLanguage().code
                         // Perform background audio analysis
                         val analysisResult = processAudio(
                             context = appContext,
@@ -111,7 +112,8 @@ class CallSyncWorker(
                             geminiRepo = geminiRepo,
                             nvidiaRepo = nvidiaRepo,
                             cloudflareRepo = cloudflareRepo,
-                            preferredEngine = preferredEngine
+                            preferredEngine = preferredEngine,
+                            spokenLanguage = spokenLanguage
                         )
 
                         val finalTranscription = analysisResult.first
@@ -263,7 +265,8 @@ class CallSyncWorker(
         geminiRepo: com.example.network.GeminiRepository,
         nvidiaRepo: com.example.network.NvidiaRepository,
         cloudflareRepo: com.example.network.CloudflareWorkerRepository,
-        preferredEngine: PreferredEngine
+        preferredEngine: PreferredEngine,
+        spokenLanguage: String = "auto"
     ): Pair<String, String> {
         val maxFileSizeGemini = 15L * 1024 * 1024
         val maxFileSizeNvidia = 25L * 1024 * 1024
@@ -285,7 +288,7 @@ class CallSyncWorker(
         if (tryCloudflareFirst && fileSize <= maxFileSizeCloudflare) {
             audioBytes = readAudioBytes(context, uri, maxFileSizeCloudflare)
             if (audioBytes != null) {
-                val cfRes = cloudflareRepo.analyzeAudio(audioBytes, fileName, resolvedMime)
+                val cfRes = cloudflareRepo.analyzeAudio(audioBytes, fileName, resolvedMime, spokenLanguage)
                 if (cfRes.isSuccess) {
                     val pair = cfRes.getOrThrow()
                     transcription = pair.first
@@ -315,7 +318,7 @@ class CallSyncWorker(
             val bytes = audioBytes ?: readAudioBytes(context, uri, maxFileSizeCloudflare)
             audioBytes = bytes
             if (bytes != null) {
-                val cfRes = cloudflareRepo.analyzeAudio(bytes, fileName, resolvedMime)
+                val cfRes = cloudflareRepo.analyzeAudio(bytes, fileName, resolvedMime, spokenLanguage)
                 if (cfRes.isSuccess) {
                     val pair = cfRes.getOrThrow()
                     transcription = pair.first

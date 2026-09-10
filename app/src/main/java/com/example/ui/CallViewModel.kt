@@ -44,6 +44,7 @@ import com.example.data.CallerProfile
 import com.example.data.CallerProfileBuilder
 import com.example.data.CommitmentExtractor
 import com.example.data.PreferredEngine
+import com.example.data.SpokenLanguage
 import com.example.network.CloudflareWorkerRepository
 import com.example.sync.CallSyncWorker
 import com.example.sync.NotificationHelper
@@ -114,6 +115,7 @@ class CallViewModel(
 
     // AI Engine Preferences & Cloudflare Worker State
     val preferredEngine = MutableStateFlow(preferencesManager?.getPreferredEngine() ?: PreferredEngine.AUTO)
+    val spokenLanguage = MutableStateFlow(preferencesManager?.getSpokenLanguage() ?: SpokenLanguage.AUTO)
     val cloudflareWorkerUrl = MutableStateFlow(apiKeyManager?.getCloudflareWorkerUrl() ?: "")
     val cloudflareWorkerToken = MutableStateFlow(apiKeyManager?.getCloudflareWorkerToken() ?: "")
 
@@ -135,6 +137,12 @@ class CallViewModel(
         preferencesManager?.setPreferredEngine(engine)
         preferredEngine.value = engine
         updateStatusMessage.value = "Engine: ${engine.displayName}"
+    }
+
+    fun setSpokenLanguage(language: SpokenLanguage) {
+        preferencesManager?.setSpokenLanguage(language)
+        spokenLanguage.value = language
+        updateStatusMessage.value = "Language: ${language.displayName}"
     }
 
     fun saveApiKey(newKey: String) {
@@ -169,10 +177,14 @@ class CallViewModel(
         cloudflareUrl: String,
         cloudflareToken: String,
         nvidiaKey: String,
-        geminiKey: String
+        geminiKey: String,
+        language: SpokenLanguage = SpokenLanguage.AUTO
     ) {
         preferencesManager?.setPreferredEngine(engine)
         preferredEngine.value = engine
+
+        preferencesManager?.setSpokenLanguage(language)
+        spokenLanguage.value = language
 
         val cleanUrl = cloudflareUrl.trim().trimEnd('/')
         val cleanToken = cloudflareToken.trim()
@@ -185,7 +197,7 @@ class CallViewModel(
         apiKeyManager?.setApiKey(geminiKey)
 
         showApiKeyDialog.value = false
-        updateStatusMessage.value = "Settings saved ✅ Engine: ${engine.displayName}"
+        updateStatusMessage.value = "Settings saved ✅ Engine: ${engine.displayName} (${language.displayName})"
     }
 
     fun testApiKey(apiKey: String, onResult: (Boolean, String) -> Unit) {
@@ -1029,7 +1041,7 @@ class CallViewModel(
                     val bytes = readAudioBytes(context, uri, MAX_FILE_SIZE_CLOUDFLARE)
                     audioBytes = bytes
                     if (bytes != null) {
-                        val cfResult = cloudflareRepository?.analyzeAudio(bytes, fileName, resolvedMime)
+                        val cfResult = cloudflareRepository?.analyzeAudio(bytes, fileName, resolvedMime, spokenLanguage.value.code)
                         if (cfResult?.isSuccess == true) {
                             val pair = cfResult.getOrThrow()
                             transcription = pair.first
@@ -1070,7 +1082,7 @@ class CallViewModel(
                     val bytes = audioBytes ?: readAudioBytes(context, uri, MAX_FILE_SIZE_CLOUDFLARE)
                     audioBytes = bytes
                     if (bytes != null) {
-                        val cfResult = cloudflareRepository?.analyzeAudio(bytes, fileName, resolvedMime)
+                        val cfResult = cloudflareRepository?.analyzeAudio(bytes, fileName, resolvedMime, spokenLanguage.value.code)
                         if (cfResult?.isSuccess == true) {
                             val pair = cfResult.getOrThrow()
                             transcription = pair.first

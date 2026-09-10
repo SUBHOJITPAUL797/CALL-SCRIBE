@@ -17,7 +17,7 @@ export default {
         headers: {
           "Access-Control-Allow-Origin": "*",
           "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Call-Title, X-Call-Title-Encoded",
+          "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Call-Title, X-Call-Title-Encoded, X-Call-Language",
         },
       });
     }
@@ -39,6 +39,7 @@ export default {
           vad_filter: true,
           condition_on_previous_text: false,
           hallucination_filter: true,
+          languages: ["auto", "bn", "hi", "en"],
         },
       });
     }
@@ -64,6 +65,10 @@ export default {
       return jsonResponse({ error: "Method not allowed. Use POST for analysis." }, 405);
     }
 
+    const urlParamLang = url.searchParams.get("lang") || url.searchParams.get("language");
+    const headerLang = request.headers.get("X-Call-Language");
+    const language = (urlParamLang || headerLang || "auto").trim().toLowerCase();
+
     // 5. Speech-to-Text (Transcription) Endpoint
     if (path === "/transcribe") {
       try {
@@ -73,8 +78,21 @@ export default {
         }
 
         const audioUint8 = new Uint8Array(audioBuffer);
-        const whisperResult = await runWhisperWithFallback(env, audioUint8);
-        const rawTranscription = (whisperResult.text || whisperResult.transcription || "").trim();
+        let whisperResult = await runWhisperWithFallback(env, audioUint8, language);
+        let rawTranscription = (whisperResult.text || whisperResult.transcription || "").trim();
+
+        // If Whisper hallucinated an irrelevant foreign script (e.g. Korean, Cyrillic, Chinese) on Bengali/Hindi audio:
+        if (hasIrrelevantForeignScript(rawTranscription) && language !== "ko" && language !== "ru" && language !== "zh") {
+          console.warn(`Whisper misidentified language (${rawTranscription.slice(0, 40)}...). Retrying with Bengali focus...`);
+          try {
+            const retryResult = await runWhisperWithFallback(env, audioUint8, "bn");
+            const retryRaw = (retryResult.text || retryResult.transcription || "").trim();
+            if (retryRaw.length > 0 && !hasIrrelevantForeignScript(retryRaw)) {
+              rawTranscription = retryRaw;
+            }
+          } catch (_) {}
+        }
+
         const transcription = cleanWhisperTranscript(rawTranscription);
 
         return jsonResponse({
@@ -165,9 +183,22 @@ export default {
           return jsonResponse({ error: "No audio data received." }, 400);
         }
 
-        // Step A: Whisper ASR with VAD and anti-hallucination parameters
-        const whisperResult = await runWhisperWithFallback(env, audioBytes);
-        const rawTranscription = (whisperResult.text || whisperResult.transcription || "").trim();
+        // Step A: Whisper ASR with language steering, VAD, and anti-hallucination
+        let whisperResult = await runWhisperWithFallback(env, audioBytes, language);
+        let rawTranscription = (whisperResult.text || whisperResult.transcription || "").trim();
+
+        // If Whisper hallucinated an irrelevant foreign script (e.g. Korean, Cyrillic, Chinese) on Bengali/Hindi audio:
+        if (hasIrrelevantForeignScript(rawTranscription) && language !== "ko" && language !== "ru" && language !== "zh") {
+          console.warn(`Whisper misidentified language (${rawTranscription.slice(0, 40)}...). Retrying with Bengali focus...`);
+          try {
+            const retryResult = await runWhisperWithFallback(env, audioBytes, "bn");
+            const retryRaw = (retryResult.text || retryResult.transcription || "").trim();
+            if (retryRaw.length > 0 && !hasIrrelevantForeignScript(retryRaw)) {
+              rawTranscription = retryRaw;
+            }
+          } catch (_) {}
+        }
+
         const transcription = cleanWhisperTranscript(rawTranscription);
 
         // Step B: Summarization
@@ -199,28 +230,56 @@ const WHISPER_MODELS = [
   "@cf/openai/whisper",
 ];
 
+const BENGALI_HINDI_ENGLISH_PROMPT = "বাংলা, হিন্দি এবং ইংরেজি কথোপকথন। কেমন আছেন, ঠিক আছে, কি খবর, kya haal hai, namaste, hello, thanks.";
+
+function hasIrrelevantForeignScript(text) {
+  if (!text || typeof text !== "string") return false;
+  // Non-South Asian, non-Latin scripts that Whisper hallucinates on noisy/silent telephone audio:
+  // Korean (Hangul), Cyrillic, Chinese/Japanese, Arabic, Greek, Hebrew, Thai
+  const foreignScriptPattern = /[\uac00-\ud7af\u1100-\u11ff\u0400-\u04ff\u4e00-\u9fff\u3040-\u30ff\u0600-\u06ff\u0590-\u05ff\u0e00-\u0e7f\u0370-\u03ff]/u;
+  return foreignScriptPattern.test(text);
+}
+
 /**
- * Runs Whisper with VAD, condition_on_previous_text=false, and model fallback.
+ * Runs Whisper with language steering, VAD, and model fallback.
  */
-async function runWhisperWithFallback(env, audioBytes) {
+async function runWhisperWithFallback(env, audioBytes, language = "auto") {
+  const primaryOptions = {
+    audio: [...audioBytes],
+    vad_filter: true,
+    condition_on_previous_text: false,
+  };
+
+  if (language === "bn" || language === "bengali") {
+    primaryOptions.language = "bn";
+    primaryOptions.initial_prompt = "বাংলা কথোপকথন। কেমন আছেন, ঠিক আছে, কি খবর, হ্যাঁ, না।";
+  } else if (language === "hi" || language === "hindi") {
+    primaryOptions.language = "hi";
+    primaryOptions.initial_prompt = "हिंदी में बातचीत। क्या हाल है, नमस्ते, ठीक है, हाँ, नहीं।";
+  } else if (language === "en" || language === "english") {
+    primaryOptions.language = "en";
+    primaryOptions.initial_prompt = "English phone call conversation between two people.";
+  } else {
+    // Auto multilingual: explicitly prime for Bengali, Hindi & English
+    primaryOptions.initial_prompt = BENGALI_HINDI_ENGLISH_PROMPT;
+  }
+
   let lastError = null;
   for (const model of WHISPER_MODELS) {
     try {
-      // Primary attempt: VAD enabled and repetition feedback disabled
-      const res = await env.AI.run(model, {
-        audio: [...audioBytes],
-        vad_filter: true,
-        condition_on_previous_text: false,
-      });
+      const res = await env.AI.run(model, primaryOptions);
       if (res && (res.text !== undefined || res.transcription !== undefined)) {
         return res;
       }
     } catch (e) {
-      console.warn(`Whisper ${model} with VAD failed (${e.message}), trying direct audio...`);
+      console.warn(`Whisper ${model} with options failed (${e.message}), trying direct audio with prompt...`);
       try {
-        const fallbackRes = await env.AI.run(model, {
+        const fallbackOptions = {
           audio: [...audioBytes],
-        });
+        };
+        if (primaryOptions.language) fallbackOptions.language = primaryOptions.language;
+        if (primaryOptions.initial_prompt) fallbackOptions.initial_prompt = primaryOptions.initial_prompt;
+        const fallbackRes = await env.AI.run(model, fallbackOptions);
         if (fallbackRes && (fallbackRes.text !== undefined || fallbackRes.transcription !== undefined)) {
           return fallbackRes;
         }
@@ -292,7 +351,15 @@ function cleanWhisperTranscript(rawText) {
     }
   }
 
-  // 5. Final check: if alphanumeric characters count is less than 2, it's silence
+  // 5. If text still contains irrelevant foreign scripts (Korean, Cyrillic, Chinese, etc.):
+  if (hasIrrelevantForeignScript(text)) {
+    const validSouthAsianOrLatin = text.replace(/[^\u0980-\u09ff\u0900-\u097fa-zA-Z0-9]/gu, "");
+    if (validSouthAsianOrLatin.length < 5) {
+      return "";
+    }
+  }
+
+  // 6. Final check: if alphanumeric characters count is less than 2, it's silence
   const finalAlpha = text.replace(/[^\p{L}\p{N}]/gu, "");
   if (finalAlpha.length < 2) {
     return "";
@@ -307,12 +374,15 @@ function cleanWhisperTranscript(rawText) {
 async function runSummarization(env, transcript, callTitle) {
   const systemPrompt = `You are the AI assistant for Call Scribe, a phone call recording and transcription application.
 Analyze the provided phone call transcript accurately.
-CRITICAL: If the transcript contains only background noise, repeated filler words, corrupted text, or lacks coherent speech, do not invent facts. State clearly in the Executive Summary that no coherent conversation was detected, and write "- None" for all other sections.
+CRITICAL LANGUAGE HANDLING:
+- The conversation may be spoken in Bengali (বাংলা), Hindi (हिंदी), English, or a mix of these (Banglish / Hinglish).
+- Provide the structured summary, key points, action items, and dates in clear English so the user can easily understand everything that was discussed and agreed upon.
+- If the transcript contains only background noise, repeated filler words, corrupted text, or lacks coherent speech, do not invent facts. State clearly in the Executive Summary that no coherent conversation was detected, and write "- None" for all other sections.
 
 You must output a structured markdown summary in the exact format:
 
 ## 📋 Executive Summary
-(2-4 concise sentences summarizing the purpose and conclusion of the call)
+(2-4 concise sentences in English summarizing the purpose and conclusion of the call)
 
 ## 📝 Key Discussion Points
 - (Bullet point 1)
@@ -352,7 +422,7 @@ Please produce the structured analysis according to the specified format.`;
  * Answers questions about a call using Llama 3.1 8B Instruct.
  */
 async function runChat(env, transcript, summary, question) {
-  const systemPrompt = `You are the AI assistant for Call Scribe. Answer the user's question about this phone call accurately, concisely, and based only on the provided call transcript and summary. If the answer is not mentioned, politely explain that it wasn't mentioned in the call.`;
+  const systemPrompt = `You are the AI assistant for Call Scribe. The call may be in Bengali, Hindi, or English. Answer the user's question about this phone call accurately, concisely, in clear English (or Bengali/Hindi if the user asks in that language), based strictly on the provided transcript and summary. If the answer is not mentioned, politely explain that it wasn't mentioned in the call.`;
 
   const contextText = `Call Summary:\n${summary}\n\nCall Transcript:\n"""\n${transcript.slice(0, 10000)}\n"""`;
 

@@ -301,9 +301,19 @@ class GeminiRepository(
             else -> "audio/mp3"
         }
 
-        // Rich system prompt for complete, useful call analysis
+        // Rich multilingual system prompt for complete call analysis
         val systemPrompt = """
-You are an expert call recording analyst. Your job is to make sure the user knows EVERYTHING that was said in this call without having to listen to it. Be thorough, structured, and detailed.
+You are an expert multilingual call recording analyst specializing in Bengali (বাংলা), Hindi (हिंदी), English, and code-mixed conversations (Banglish / Hinglish).
+Your job is to make sure the user knows EVERYTHING that was said in this call without having to listen to it. Be thorough, structured, and detailed.
+
+CRITICAL LANGUAGE INSTRUCTIONS:
+- The speakers predominantly speak in Bengali, Hindi, English, or a mix of these languages.
+- In TRANSCRIPTION: write the exact verbatim words spoken in the correct script.
+  * For Bengali speech, write in Bengali script (বাংলা) or natural script if mixed.
+  * For Hindi speech, write in Devanagari script (हिंदी) or natural script if mixed.
+  * For English speech, write in English.
+  * Do NOT translate or transcribe into unrelated languages like Korean, Arabic, Chinese, or Welsh.
+- In SUMMARY: Provide the structured summary in clear English so the user can easily understand all points, commitments, and decisions regardless of the language spoken in the call.
 
 Listen to this phone call audio carefully. Then output in EXACTLY this format:
 

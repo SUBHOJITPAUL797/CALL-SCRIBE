@@ -18,6 +18,13 @@ enum class PreferredEngine(val displayName: String, val description: String) {
     ON_DEVICE("📱 On-Device (Offline)", "Local extractive analysis, 100% offline & private")
 }
 
+enum class SpokenLanguage(val code: String, val displayName: String) {
+    AUTO("auto", "Auto (Bengali, Hindi & English)"),
+    BENGALI("bn", "Bengali — বাংলা"),
+    HINDI("hi", "Hindi — हिंदी"),
+    ENGLISH("en", "English")
+}
+
 class CallPreferencesManager(context: Context) {
     private val prefs: SharedPreferences = context.applicationContext.getSharedPreferences(
         PREFS_NAME,
@@ -133,6 +140,22 @@ class CallPreferencesManager(context: Context) {
         prefs.edit().putString(KEY_PREFERRED_ENGINE, engine.name).apply()
     }
 
+    // ── Spoken Language ───────────────────────────────────────────────────────
+
+
+    fun getSpokenLanguage(): SpokenLanguage {
+        val saved = prefs.getString(KEY_SPOKEN_LANGUAGE, SpokenLanguage.AUTO.name)
+        return try {
+            SpokenLanguage.valueOf(saved ?: SpokenLanguage.AUTO.name)
+        } catch (_: Exception) {
+            SpokenLanguage.AUTO
+        }
+    }
+
+    fun setSpokenLanguage(language: SpokenLanguage) {
+        prefs.edit().putString(KEY_SPOKEN_LANGUAGE, language.name).apply()
+    }
+
     companion object {
         private const val PREFS_NAME = "call_scribe_prefs"
         private const val KEY_PERSISTED_FOLDER_URI = "persisted_folder_uri"
@@ -142,5 +165,6 @@ class CallPreferencesManager(context: Context) {
         private const val KEY_COMMITMENT_REMINDERS_ENABLED = "commitment_reminders_enabled"
         private const val KEY_COMPLETED_ACTION_ITEMS = "completed_action_items"
         private const val KEY_PREFERRED_ENGINE = "preferred_ai_engine"
+        private const val KEY_SPOKEN_LANGUAGE = "spoken_language"
     }
 }
