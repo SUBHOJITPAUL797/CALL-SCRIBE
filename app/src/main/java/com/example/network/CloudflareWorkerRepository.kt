@@ -80,6 +80,19 @@ class CloudflareWorkerRepository(
         }
     }
 
+    private fun sanitizeHeaderValue(value: String): String {
+        val ascii = value.filter { it.code in 32..126 }
+        return if (ascii.isNotBlank()) ascii else "Call_Recording"
+    }
+
+    private fun urlEncode(value: String): String {
+        return try {
+            java.net.URLEncoder.encode(value, "UTF-8")
+        } catch (_: Exception) {
+            sanitizeHeaderValue(value)
+        }
+    }
+
     /**
      * Transcribe audio bytes using Cloudflare Workers AI (@cf/openai/whisper).
      */
@@ -97,13 +110,17 @@ class CloudflareWorkerRepository(
         val mediaType = (mimeType.ifBlank { "audio/mp3" }).toMediaTypeOrNull()
         val requestBody = audioBytes.toRequestBody(mediaType)
 
+        val encodedTitle = urlEncode(fileName)
+        val url = "$baseUrl/transcribe?title=$encodedTitle"
+
         val request = Request.Builder()
-            .url("$baseUrl/transcribe")
+            .url(url)
             .apply {
                 if (token.isNotBlank()) {
                     addHeader("Authorization", "Bearer $token")
                 }
-                addHeader("X-Call-Title", fileName)
+                addHeader("X-Call-Title-Encoded", encodedTitle)
+                addHeader("X-Call-Title", sanitizeHeaderValue(fileName))
             }
             .post(requestBody)
             .build()
@@ -204,13 +221,17 @@ class CloudflareWorkerRepository(
         val mediaType = (mimeType.ifBlank { "audio/mp3" }).toMediaTypeOrNull()
         val requestBody = audioBytes.toRequestBody(mediaType)
 
+        val encodedTitle = urlEncode(fileName)
+        val url = "$baseUrl/analyze?title=$encodedTitle"
+
         val request = Request.Builder()
-            .url("$baseUrl/analyze")
+            .url(url)
             .apply {
                 if (token.isNotBlank()) {
                     addHeader("Authorization", "Bearer $token")
                 }
-                addHeader("X-Call-Title", fileName)
+                addHeader("X-Call-Title-Encoded", encodedTitle)
+                addHeader("X-Call-Title", sanitizeHeaderValue(fileName))
             }
             .post(requestBody)
             .build()
@@ -220,24 +241,34 @@ class CloudflareWorkerRepository(
             val code = response.code
             val body = response.body?.string() ?: ""
 
+            if (code == 401 || code == 403) {
+                return@withContext Result.failure(Exception("Cloudflare Worker unauthorized. Check your secret API token."))
+            }
+
             if (response.isSuccessful) {
                 val json = JSONObject(body)
                 val transcription = json.optString("transcription", json.optString("text", "")).trim()
                 val summary = json.optString("summary", "").trim()
-                if (transcription.isNotBlank() && summary.isNotBlank()) {
-                    return@withContext Result.success(Pair(transcription, summary))
+                if (summary.isNotBlank()) {
+                    val finalTrans = if (transcription.isNotBlank()) transcription else "(No audible speech detected)"
+                    return@withContext Result.success(Pair(finalTrans, summary))
                 }
             }
 
-            // Fallback to separate endpoints if /analyze not supported on worker
-            val transResult = transcribeAudio(audioBytes, fileName, mimeType)
-            if (transResult.isFailure) {
-                return@withContext Result.failure(transResult.exceptionOrNull()!!)
+            // Fallback to separate endpoints if /analyze endpoint returned 404 (e.g. older worker script)
+            if (code == 404) {
+                val transResult = transcribeAudio(audioBytes, fileName, mimeType)
+                if (transResult.isFailure) {
+                    return@withContext Result.failure(transResult.exceptionOrNull()!!)
+                }
+                val trans = transResult.getOrThrow()
+                val sumResult = summarizeTranscript(trans, fileName)
+                val sum = sumResult.getOrDefault("")
+                return@withContext Result.success(Pair(trans, sum))
             }
-            val trans = transResult.getOrThrow()
-            val sumResult = summarizeTranscript(trans, fileName)
-            val sum = sumResult.getOrDefault("")
-            Result.success(Pair(trans, sum))
+
+            val errMsg = try { JSONObject(body).optString("error", body) } catch (_: Exception) { body }
+            Result.failure(Exception("Cloudflare analysis failed (HTTP $code): ${errMsg.take(200)}"))
         } catch (e: Exception) {
             Result.failure(Exception("Cloudflare analysis failed: ${e.localizedMessage}", e))
         }

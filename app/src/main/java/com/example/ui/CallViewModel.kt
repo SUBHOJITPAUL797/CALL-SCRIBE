@@ -937,6 +937,7 @@ class CallViewModel(
             var transcription = ""
             var summary = ""
             var audioBytes: ByteArray? = null
+            var lastEngineError: Throwable? = null
             val currentEngine = preferredEngine.value
 
             // ── Mode 0: Explicit On-Device Offline Selection ─────────────────────────────
@@ -956,6 +957,8 @@ class CallViewModel(
                             val pair = cfResult.getOrThrow()
                             transcription = pair.first
                             summary = pair.second
+                        } else {
+                            lastEngineError = cfResult?.exceptionOrNull()
                         }
                     }
                 }
@@ -979,6 +982,8 @@ class CallViewModel(
                             val pair = geminiResult.getOrThrow()
                             transcription = pair.first
                             summary = pair.second
+                        } else {
+                            lastEngineError = geminiResult.exceptionOrNull()
                         }
                     }
                 }
@@ -993,6 +998,8 @@ class CallViewModel(
                             val pair = cfResult.getOrThrow()
                             transcription = pair.first
                             summary = pair.second
+                        } else {
+                            lastEngineError = cfResult?.exceptionOrNull()
                         }
                     }
                 }
@@ -1005,6 +1012,8 @@ class CallViewModel(
                         val asrRes = nvidiaRepository?.transcribeAudio(bytes, fileName, resolvedMime)
                         if (asrRes?.isSuccess == true) {
                             transcription = asrRes.getOrThrow()
+                        } else {
+                            lastEngineError = asrRes?.exceptionOrNull()
                         }
                     }
                 }
@@ -1027,6 +1036,10 @@ class CallViewModel(
 
                 // ── Mode 6: Local on-device fallback if cloud engines are unconfigured or failed ──
                 if (transcription.isBlank()) {
+                    if (existingId != null && currentEngine != PreferredEngine.ON_DEVICE) {
+                        // User explicitly requested re-analysis using a cloud engine, and it failed
+                        return Result.failure(lastEngineError ?: Exception("Could not analyze call. Check AI Engine settings or network connection."))
+                    }
                     val (localTrans, localSum) = LocalAnalysisEngine.analyzeLocally("", fileName)
                     transcription = localTrans
                     summary = localSum
@@ -1036,11 +1049,13 @@ class CallViewModel(
                 }
             }
 
+            val existingTimestamp = existingId?.let { withContext(Dispatchers.IO) { repository.getById(it)?.timestamp } }
             val recording = Recording(
                 id = existingId ?: 0,
                 title = fileName,
                 contentEncrypted = SimpleEncryption.encrypt(transcription),
                 summaryEncrypted = SimpleEncryption.encrypt(summary),
+                timestamp = existingTimestamp ?: System.currentTimeMillis(),
                 sourceUri = uri.toString()
             )
             repository.insert(recording)
@@ -1096,7 +1111,7 @@ class CallViewModel(
                     activeChatRecording.value = updated
                     chatMessages.value = chatMessages.value + ChatMessage(
                         MessageSender.AI,
-                        "✅ Call transcribed successfully with Gemini! I now have the full verbatim transcript. Ask me anything about this call!"
+                        "✅ Call transcribed successfully! I now have the full transcript. Ask me anything about this call!"
                     )
                 }
                 if (updated != null && preferencesManager?.isCommitmentRemindersEnabled() != false) {
@@ -1112,7 +1127,11 @@ class CallViewModel(
                         )
                     }
                 }
-                updateStatusMessage.value = "Analysis complete! ✅"
+                if (updated != null && !updated.decodedSummary.contains("Not Available") && !updated.decodedSummary.contains("Pending")) {
+                    updateStatusMessage.value = "Analysis complete! ✅"
+                } else {
+                    updateStatusMessage.value = "⚠️ Could not transcribe audio. Check AI Engine settings."
+                }
             } else {
                 val err = result.exceptionOrNull()
                 if (err is ApiQuotaExceededException || err?.message?.contains("429") == true) {

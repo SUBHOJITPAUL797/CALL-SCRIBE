@@ -147,7 +147,18 @@ export default {
           // Raw binary audio in request body
           const buffer = await request.arrayBuffer();
           audioBytes = new Uint8Array(buffer);
-          callTitle = request.headers.get("X-Call-Title") || "Call Recording";
+
+          const urlParamTitle = url.searchParams.get("title");
+          const encodedHeaderTitle = request.headers.get("X-Call-Title-Encoded");
+          const rawHeaderTitle = request.headers.get("X-Call-Title");
+
+          if (urlParamTitle) {
+            try { callTitle = decodeURIComponent(urlParamTitle); } catch (_) { callTitle = urlParamTitle; }
+          } else if (encodedHeaderTitle) {
+            try { callTitle = decodeURIComponent(encodedHeaderTitle); } catch (_) { callTitle = encodedHeaderTitle; }
+          } else if (rawHeaderTitle) {
+            callTitle = rawHeaderTitle;
+          }
         }
 
         if (!audioBytes || audioBytes.byteLength === 0) {
@@ -192,28 +203,23 @@ const WHISPER_MODELS = [
  * Runs Whisper with VAD, condition_on_previous_text=false, and model fallback.
  */
 async function runWhisperWithFallback(env, audioBytes) {
-  const fullPayload = {
-    audio: [...audioBytes],
-    vad_filter: true,
-    condition_on_previous_text: false,
-    initial_prompt: "Phone call conversation between two people.",
-    no_speech_threshold: 0.6,
-  };
-
   let lastError = null;
   for (const model of WHISPER_MODELS) {
     try {
-      const res = await env.AI.run(model, fullPayload);
+      // Primary attempt: VAD enabled and repetition feedback disabled
+      const res = await env.AI.run(model, {
+        audio: [...audioBytes],
+        vad_filter: true,
+        condition_on_previous_text: false,
+      });
       if (res && (res.text !== undefined || res.transcription !== undefined)) {
         return res;
       }
     } catch (e) {
-      console.warn(`Whisper ${model} with full options failed: ${e.message}, trying standard options...`);
+      console.warn(`Whisper ${model} with VAD failed (${e.message}), trying direct audio...`);
       try {
         const fallbackRes = await env.AI.run(model, {
           audio: [...audioBytes],
-          vad_filter: true,
-          condition_on_previous_text: false,
         });
         if (fallbackRes && (fallbackRes.text !== undefined || fallbackRes.transcription !== undefined)) {
           return fallbackRes;
