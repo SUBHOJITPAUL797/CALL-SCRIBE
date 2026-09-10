@@ -17,6 +17,7 @@ import com.example.data.LocalAnalysisEngine
 import com.example.data.Recording
 import com.example.data.RecordingRepository
 import com.example.data.SimpleEncryption
+import com.example.data.TranscriptionValidator
 import com.example.network.ApiKeyInvalidException
 import com.example.network.ApiKeyMissingException
 import com.example.network.ApiQuotaExceededException
@@ -326,14 +327,7 @@ class CallViewModel(
     private var chatJob: Job? = null
 
     private fun hasValidTranscript(transcription: String): Boolean {
-        if (transcription.isBlank()) return false
-        val lower = transcription.lowercase()
-        return !lower.contains("audio transcription required") &&
-               !lower.contains("transcription requires") &&
-               !lower.contains("ai analysis not available") &&
-               !lower.contains("on-device speech analysis") &&
-               !lower.contains("no audible speech detected") &&
-               !lower.contains("tap 🔑")
+        return TranscriptionValidator.hasValidTranscript(transcription)
     }
 
     // --- Chat With Call Methods ---
@@ -1142,18 +1136,7 @@ class CallViewModel(
     }
 
     private fun isUnusableTranscription(transcription: String, summary: String): Boolean {
-        val cleanTrans = transcription.trim()
-        if (cleanTrans.isBlank()) return true
-        if (cleanTrans.equals("(No audible speech detected)", ignoreCase = true)) return true
-        if (cleanTrans.contains("No audible speech detected", ignoreCase = true)) return true
-        if (cleanTrans.contains("Audio Transcription Required", ignoreCase = true)) return true
-        if (cleanTrans.contains("Transcription requires", ignoreCase = true)) return true
-        if (summary.contains("No coherent conversation was detected", ignoreCase = true)) return true
-        if (summary.contains("No clear speech or conversation was detected", ignoreCase = true)) return true
-        if (summary.contains("contains only background noise", ignoreCase = true)) return true
-        // Autoregressive repetition loop check e.g. "शाशाशाशा..." or "শাশাশাশা..."
-        if (Regex("""([^\s]{1,4})\1{3,}""").containsMatchIn(cleanTrans)) return true
-        return false
+        return TranscriptionValidator.isUnusableTranscription(transcription, summary)
     }
 
     private suspend fun processAudioFile(
@@ -1232,7 +1215,7 @@ class CallViewModel(
 
                             if (geminiResult.isSuccess) {
                                 val pair = geminiResult.getOrThrow()
-                                if (!isUnusableTranscription(pair.first, pair.second) || transcription.isBlank() || transcription.contains("No audible speech detected", ignoreCase = true)) {
+                                if (!isUnusableTranscription(pair.first, pair.second) || transcription.isBlank() || isUnusableTranscription(transcription, summary)) {
                                     transcription = pair.first
                                     summary = pair.second
                                 }
@@ -1302,6 +1285,7 @@ class CallViewModel(
             }
 
             audioBytes = null // Guarantee memory release
+            transcription = TranscriptionValidator.sanitizeTranscription(transcription, summary)
 
             val existingRec = existingId?.let { withContext(Dispatchers.IO) { repository.getById(it) } }
             val existingTimestamp = existingRec?.timestamp

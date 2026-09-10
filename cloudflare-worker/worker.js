@@ -205,7 +205,7 @@ export default {
           } catch (_) {}
         }
 
-        const transcription = cleanWhisperTranscript(rawTranscription);
+        let transcription = cleanWhisperTranscript(rawTranscription);
 
         // Step B: Summarization
         let summary = "";
@@ -213,6 +213,15 @@ export default {
           summary = await runSummarization(env, transcription, callTitle);
         } else {
           summary = `## 📋 Executive Summary\nNo clear speech or conversation was detected in this recording. The audio appears to contain silence or background noise only.\n\n## 📝 Key Discussion Points\n- None detected\n\n## ✅ Action Items & Commitments\n- None\n\n## 📅 Dates & Deadlines\n- None`;
+        }
+
+        // Auto-sanitize if summary detected no coherent conversation or repetition loops:
+        if (summary.includes("No coherent conversation was detected") ||
+            summary.includes("No clear speech or conversation was detected") ||
+            summary.includes("contains only background noise") ||
+            summary.includes("repeated filler words") ||
+            isRepetitionLoop(transcription)) {
+          transcription = "(No audible speech detected)";
         }
 
         return jsonResponse({
@@ -267,7 +276,24 @@ function isRepetitionLoop(text) {
     return true;
   }
 
-  // 3. Dominant single character check (single non-space char makes up >30% of a text >25 chars):
+  // 3. Spaced multi-word or single-word repeating phrases e.g. "बापापा पो बापापा पो" or "thank you thank you"
+  // Matches 1 to 4 words repeated 3+ times back to back across Unicode scripts
+  if (/(?:^|[\s,।!?])([\p{L}\p{N}]{1,15}(?:[\s,।]+[\p{L}\p{N}]{1,15}){0,3})(?:[\s,।]+\1){2,}(?:[\s,।!?]|$)/gui.test(trimmed)) {
+    return true;
+  }
+
+  // 4. Token uniqueness ratio check:
+  // When Whisper gets trapped in an autoregressive loop on noise/silence,
+  // it repeats a tiny set of words over and over
+  const tokens = trimmed.split(/[\s,।!?\.\-]+/).filter(t => t.length > 0);
+  if (tokens.length >= 8) {
+    const uniqueTokens = new Set(tokens.map(t => t.toLowerCase()));
+    if (uniqueTokens.size / tokens.length < 0.32) {
+      return true;
+    }
+  }
+
+  // 5. Dominant single character check (single non-space char makes up >30% of a text >25 chars):
   if (trimmed.length > 25) {
     const counts = {};
     let maxCharCount = 0;
@@ -388,8 +414,8 @@ function cleanWhisperTranscript(rawText) {
     text = deduplicated.join(" ");
   }
 
-  // 5. Remove consecutive duplicate words or short phrases with spaces (e.g. "Thank you. Thank you. Thank you.")
-  text = text.replace(/\b([a-zA-Z0-9\p{L}]{1,}(?:\s+[a-zA-Z0-9\p{L}]{1,}){0,3})\s+(?:\1\s*){2,}/gui, "$1 ");
+  // 5. Remove consecutive duplicate words or short phrases with spaces (e.g. "Thank you. Thank you. Thank you." or "बापापा पो बापापा पो")
+  text = text.replace(/(?:^|[\s,।!?])([\p{L}\p{N}]{1,15}(?:[\s,।]+[\p{L}\p{N}]{1,15}){0,3})(?:[\s,।]+\1){2,}(?:[\s,।!?]|$)/gui, "$1 ");
 
   // 6. Known Whisper silence/noise hallucinations
   const lower = text.toLowerCase().trim();

@@ -68,13 +68,19 @@ data class Recording(
     val durationMs: Int = 0
 ) {
     @delegate:Transient
-    val decodedTranscription: String by lazy {
-        SimpleEncryption.decrypt(contentEncrypted)
+    val decodedSummary: String by lazy {
+        SimpleEncryption.decrypt(summaryEncrypted)
     }
 
     @delegate:Transient
-    val decodedSummary: String by lazy {
-        SimpleEncryption.decrypt(summaryEncrypted)
+    val decodedTranscription: String by lazy {
+        val raw = SimpleEncryption.decrypt(contentEncrypted)
+        TranscriptionValidator.sanitizeTranscription(raw, decodedSummary)
+    }
+
+    @delegate:Transient
+    val rawTranscription: String by lazy {
+        SimpleEncryption.decrypt(contentEncrypted)
     }
 }
 

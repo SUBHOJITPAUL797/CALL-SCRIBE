@@ -14,8 +14,8 @@ android {
     applicationId = "com.subhojitscribe.dasmo.in"
     minSdk = 24
     targetSdk = 36
-    versionCode = 23
-    versionName = "1.5.9"
+    versionCode = 24
+    versionName = "1.6.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -44,7 +44,14 @@ android {
       isCrunchPngs = false
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      signingConfig = signingConfigs.getByName("release")
+      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
+      if (file(keystorePath).exists()) {
+        signingConfig = signingConfigs.getByName("release")
+      } else {
+        signingConfigs.findByName("debugConfig")?.let {
+          signingConfig = it
+        }
+      }
     }
     debug {
       signingConfigs.findByName("debugConfig")?.let {

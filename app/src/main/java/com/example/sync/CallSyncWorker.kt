@@ -21,6 +21,7 @@ import com.example.data.LocalAnalysisEngine
 import com.example.data.PreferredEngine
 import com.example.data.Recording
 import com.example.data.SimpleEncryption
+import com.example.data.TranscriptionValidator
 import com.example.di.DefaultAppContainer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
@@ -278,18 +279,7 @@ class CallSyncWorker(
     }
 
     private fun isUnusableTranscription(transcription: String, summary: String): Boolean {
-        val cleanTrans = transcription.trim()
-        if (cleanTrans.isBlank()) return true
-        if (cleanTrans.equals("(No audible speech detected)", ignoreCase = true)) return true
-        if (cleanTrans.contains("No audible speech detected", ignoreCase = true)) return true
-        if (cleanTrans.contains("Audio Transcription Required", ignoreCase = true)) return true
-        if (cleanTrans.contains("Transcription requires", ignoreCase = true)) return true
-        if (summary.contains("No coherent conversation was detected", ignoreCase = true)) return true
-        if (summary.contains("No clear speech or conversation was detected", ignoreCase = true)) return true
-        if (summary.contains("contains only background noise", ignoreCase = true)) return true
-        // Autoregressive repetition loop check e.g. "शाशाशाशा..." or "শাশাশাশা..."
-        if (Regex("""([^\s]{1,4})\1{3,}""").containsMatchIn(cleanTrans)) return true
-        return false
+        return TranscriptionValidator.isUnusableTranscription(transcription, summary)
     }
 
     private suspend fun processAudio(
@@ -350,7 +340,7 @@ class CallSyncWorker(
                     val geminiRes = geminiRepo.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
                     if (geminiRes.isSuccess) {
                         val pair = geminiRes.getOrThrow()
-                        if (!isUnusableTranscription(pair.first, pair.second) || transcription.isBlank() || transcription.contains("No audible speech detected", ignoreCase = true)) {
+                        if (!isUnusableTranscription(pair.first, pair.second) || transcription.isBlank() || isUnusableTranscription(transcription, summary)) {
                             transcription = pair.first
                             summary = pair.second
                         }
@@ -410,6 +400,7 @@ class CallSyncWorker(
         }
 
         audioBytes = null
+        transcription = TranscriptionValidator.sanitizeTranscription(transcription, summary)
 
         return Pair(transcription, summary)
     }
