@@ -1031,7 +1031,17 @@ class CallViewModel(
 
             // ── Mode 0: Explicit On-Device Offline Selection ─────────────────────────────
             if (currentEngine == PreferredEngine.ON_DEVICE) {
-                val (localTrans, localSum) = LocalAnalysisEngine.analyzeLocally("", fileName)
+                val existingTranscript = if (existingId != null) {
+                    val prev = repository.getById(existingId)
+                    prev?.decodedTranscription?.takeIf {
+                        it.isNotBlank() &&
+                        !it.contains("Audio Transcription Required") &&
+                        !it.contains("Transcription requires") &&
+                        !it.contains("Not Available") &&
+                        !it.contains("On-Device Speech Analysis")
+                    } ?: ""
+                } else ""
+                val (localTrans, localSum) = LocalAnalysisEngine.analyzeLocally(existingTranscript, fileName)
                 transcription = localTrans
                 summary = localSum
             } else {

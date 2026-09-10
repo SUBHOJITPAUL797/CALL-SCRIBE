@@ -137,4 +137,36 @@ class CallAutoAnalyzeAndCommitmentTest {
         assertEquals("01:05", CallMetadataParser.formatDuration(65000))
         assertEquals("10:30", CallMetadataParser.formatDuration(630000))
     }
+
+    @Test
+    fun testLocalAnalysisEngineWithoutTranscript() {
+        val (trans, sum) = com.example.data.LocalAnalysisEngine.analyzeLocally("", "Test_Call.mp3")
+        assertTrue(trans.contains("Audio Transcription Required"))
+        assertTrue(sum.contains("AI Analysis Not Available"))
+
+        val answer = com.example.data.LocalAnalysisEngine.answerCallQuestionLocally("", sum, "What was discussed?")
+        assertTrue(answer.contains("I don't have a transcript"))
+    }
+
+    @Test
+    fun testLocalAnalysisEngineWithTranscriptMultilingual() {
+        val transcript = """
+            Hello John. I will send the final contract tomorrow at 5 PM.
+            আমরা কালকে সকালে ফাইলটা পাঠাবো।
+            मैं सोमवार को पैसे भेज दूंगा, करीब ₹5000।
+        """.trimIndent()
+
+        val (trans, sum) = com.example.data.LocalAnalysisEngine.analyzeLocally(transcript, "Project_Discussion.mp3")
+        assertEquals(transcript, trans)
+        assertTrue(sum.contains("CALL ANALYSIS (On-Device)"))
+        assertTrue(sum.contains("ACTION ITEMS & COMMITMENTS"))
+
+        // Test Q&A on actions
+        val actionAnswer = com.example.data.LocalAnalysisEngine.answerCallQuestionLocally(transcript, sum, "What are the action items?")
+        assertTrue(actionAnswer.contains("Action items"))
+
+        // Test Q&A on dates
+        val dateAnswer = com.example.data.LocalAnalysisEngine.answerCallQuestionLocally(transcript, sum, "When is the meeting or deadline?")
+        assertTrue(dateAnswer.contains("Dates and schedules"))
+    }
 }

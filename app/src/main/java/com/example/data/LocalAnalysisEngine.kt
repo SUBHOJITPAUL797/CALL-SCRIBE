@@ -43,35 +43,35 @@ object LocalAnalysisEngine {
     fun analyzeLocally(transcript: String, fileName: String): Pair<String, String> {
         val cleanTranscript = transcript.trim()
 
-        // No transcript available (no Gemini API key was configured)
+        // No transcript available (call audio has not been transcribed by an AI engine yet)
         if (cleanTranscript.isBlank() ||
             cleanTranscript.equals("No speech detected.", ignoreCase = true) ||
-            cleanTranscript.contains("On-Device Speech Analysis")) {
+            cleanTranscript.contains("On-Device Speech Analysis") ||
+            cleanTranscript.contains("Transcription requires")) {
 
             val smartTitle = try { CallMetadataParser.cleanCallTitle(fileName) } catch (_: Exception) { fileName }
 
             val noKeyTranscript = buildString {
-                appendLine("⚠️  Transcription requires a Gemini API Key.")
+                appendLine("⚠️ Audio Transcription Required")
                 appendLine("")
-                appendLine("This call recording has NOT been transcribed yet.")
-                appendLine("To unlock full AI analysis:")
-                appendLine("  1. Tap the 🔑 key icon in the top bar")
-                appendLine("  2. Enter your free Google Gemini API key")
-                appendLine("     (get one free at aistudio.google.com)")
-                appendLine("  3. Re-sync this folder to analyze all calls")
+                appendLine("This call recording has not been transcribed yet.")
+                appendLine("Mobile devices cannot transcribe raw audio (.m4a/.mp3) offline without a 100MB+ ASR model.")
+                appendLine("To transcribe this call for free:")
+                appendLine("  1. Tap 🔑 in the top bar")
+                appendLine("  2. Select ☁️ Cloudflare Worker (100% Free Whisper AI) or 🤖 Gemini")
+                appendLine("  3. Tap '⚡ Transcribe & Analyze Call'")
+                appendLine("")
+                appendLine("Once transcribed, on-device analysis and Q&A work 100% offline!")
             }.trim()
 
             val noKeySummary = buildString {
-                appendLine("⚠️  AI Analysis Not Available")
+                appendLine("⚠️ AI Analysis Not Available")
                 appendLine("")
                 appendLine("Call: $smartTitle")
                 appendLine("")
-                appendLine("To get a full summary of this call (who said what,")
-                appendLine("action items, decisions, key details), you need a")
-                appendLine("free Gemini API key.")
+                appendLine("Raw audio transcription requires an AI engine (Cloudflare Worker or Gemini).")
                 appendLine("")
-                appendLine("➡  Tap 🔑 in the top bar → Add your free API key")
-                appendLine("   → Re-sync folder → Full AI analysis unlocked!")
+                appendLine("➡ Tap 🔑 in the top bar to configure Cloudflare or Gemini, then tap '⚡ Transcribe & Analyze Call'.")
             }.trim()
 
             return Pair(noKeyTranscript, noKeySummary)
@@ -147,16 +147,15 @@ object LocalAnalysisEngine {
 
         if (isEmptyTranscript) {
             return buildString {
-                appendLine("⚠️  I don't have a transcript to search through for this call.")
+                appendLine("⚠️ I don't have a transcript to search through for this call.")
                 appendLine("")
-                appendLine("This call hasn't been transcribed yet because no Gemini API key is set.")
+                appendLine("This call has not been transcribed by an AI engine yet.")
                 appendLine("")
                 appendLine("To chat about this call:")
-                appendLine("  1. Tap 🔑 in the top bar")
-                appendLine("  2. Add your free Gemini API key (aistudio.google.com)")
-                appendLine("  3. Re-sync this folder")
+                appendLine("  1. Tap 🔑 in the top bar to set up Cloudflare Worker or Gemini")
+                appendLine("  2. Open the call and tap '⚡ Transcribe & Analyze Call'")
                 appendLine("")
-                appendLine("After that, I'll have the full transcript and can answer anything about this call.")
+                appendLine("Once transcribed, on-device Q&A works completely offline!")
             }.trim()
         }
 

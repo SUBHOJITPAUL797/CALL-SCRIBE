@@ -2135,9 +2135,10 @@ fun RecordingCard(
                         )
                         val needsAiTranscription = recording.decodedSummary.contains("Not Available") ||
                             recording.decodedSummary.contains("Pending AI Analysis") ||
+                            recording.decodedTranscription.contains("Audio Transcription Required") ||
                             recording.decodedTranscription.contains("Transcription requires") ||
                             recording.decodedTranscription.contains("On-Device Speech Analysis") ||
-                            !recording.decodedSummary.contains("##")
+                            recording.decodedTranscription.isBlank()
                         if (needsAiTranscription) {
                             Spacer(modifier = Modifier.height(10.dp))
                             Button(
