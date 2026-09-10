@@ -553,6 +553,7 @@ class CallViewModel(
             isDownloadingUpdate.value = false
 
             result.onSuccess { apkFile ->
+                updateInfo.value = null
                 AppUpdateManager.installApk(context, apkFile)
             }.onFailure { error ->
                 Toast.makeText(

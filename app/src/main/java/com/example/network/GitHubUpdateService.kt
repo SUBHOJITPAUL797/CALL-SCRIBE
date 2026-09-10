@@ -105,7 +105,10 @@ class GitHubUpdateRepository(
             val isSkipped = skippedVersion != null &&
                 VersionComparator.isSameVersion(skippedVersion, release.tagName)
 
+            // Prioritize an APK whose filename contains the specific release version (e.g. CallScribe-v1.5.2.apk)
             val apkAsset = release.assets.firstOrNull {
+                it.name.contains(cleanLatest) && it.name.endsWith(".apk", ignoreCase = true)
+            } ?: release.assets.firstOrNull {
                 it.name.endsWith(".apk", ignoreCase = true)
             } ?: release.assets.firstOrNull()
 

@@ -1250,6 +1250,13 @@ fun CallScribeApp(viewModel: CallViewModel) {
             text = {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Text(
+                        text = "Current: v${com.example.BuildConfig.VERSION_NAME}  ➜  New: ${info.latestVersionName}",
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF0284C7),
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
                         text = info.releaseTitle,
                         fontWeight = FontWeight.Bold,
                         color = Color.Black,
@@ -1357,7 +1364,12 @@ fun CallScribeApp(viewModel: CallViewModel) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Call Scribe", fontWeight = FontWeight.Black, color = Color.Black) },
+                title = {
+                    Column {
+                        Text("Call Scribe", fontWeight = FontWeight.Black, color = Color.Black)
+                        Text("v${com.example.BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.labelSmall, color = Color.DarkGray, fontWeight = FontWeight.Bold)
+                    }
+                },
                 actions = {
                     IconButton(
                         onClick = { viewModel.showRulesDialog.value = true }
