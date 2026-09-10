@@ -256,6 +256,21 @@ class CallSyncWorker(
         }
     }
 
+    private fun isUnusableTranscription(transcription: String, summary: String): Boolean {
+        val cleanTrans = transcription.trim()
+        if (cleanTrans.isBlank()) return true
+        if (cleanTrans.equals("(No audible speech detected)", ignoreCase = true)) return true
+        if (cleanTrans.contains("No audible speech detected", ignoreCase = true)) return true
+        if (cleanTrans.contains("Audio Transcription Required", ignoreCase = true)) return true
+        if (cleanTrans.contains("Transcription requires", ignoreCase = true)) return true
+        if (summary.contains("No coherent conversation was detected", ignoreCase = true)) return true
+        if (summary.contains("No clear speech or conversation was detected", ignoreCase = true)) return true
+        if (summary.contains("contains only background noise", ignoreCase = true)) return true
+        // Autoregressive repetition loop check e.g. "शाशाशाशा..." or "শাশাশাশা..."
+        if (Regex("""([^\s]{1,4})\1{3,}""").containsMatchIn(cleanTrans)) return true
+        return false
+    }
+
     private suspend fun processAudio(
         context: Context,
         uri: Uri,
@@ -297,8 +312,9 @@ class CallSyncWorker(
             }
         }
 
-        // 2. Try Gemini (if preferred or Cloudflare wasn't configured / failed)
-        val tryGemini = (preferredEngine == PreferredEngine.GEMINI || transcription.isBlank()) && geminiRepo.isApiKeyConfigured()
+        // 2. Try Gemini (if preferred, or if Cloudflare wasn't configured / gave no speech in AUTO mode)
+        val cloudflareGaveNoSpeech = isUnusableTranscription(transcription, summary)
+        val tryGemini = (preferredEngine == PreferredEngine.GEMINI || (preferredEngine == PreferredEngine.AUTO && cloudflareGaveNoSpeech) || transcription.isBlank()) && geminiRepo.isApiKeyConfigured()
         if (tryGemini && fileSize <= maxFileSizeGemini) {
             val bytes = audioBytes ?: readAudioBytes(context, uri, maxFileSizeGemini)
             audioBytes = bytes
@@ -307,8 +323,10 @@ class CallSyncWorker(
                 val geminiRes = geminiRepo.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
                 if (geminiRes.isSuccess) {
                     val pair = geminiRes.getOrThrow()
-                    transcription = pair.first
-                    summary = pair.second
+                    if (!isUnusableTranscription(pair.first, pair.second) || transcription.isBlank() || transcription.contains("No audible speech detected", ignoreCase = true)) {
+                        transcription = pair.first
+                        summary = pair.second
+                    }
                 }
             }
         }

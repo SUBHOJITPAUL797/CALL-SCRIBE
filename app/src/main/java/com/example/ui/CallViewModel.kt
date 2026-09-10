@@ -1012,6 +1012,21 @@ class CallViewModel(
         }
     }
 
+    private fun isUnusableTranscription(transcription: String, summary: String): Boolean {
+        val cleanTrans = transcription.trim()
+        if (cleanTrans.isBlank()) return true
+        if (cleanTrans.equals("(No audible speech detected)", ignoreCase = true)) return true
+        if (cleanTrans.contains("No audible speech detected", ignoreCase = true)) return true
+        if (cleanTrans.contains("Audio Transcription Required", ignoreCase = true)) return true
+        if (cleanTrans.contains("Transcription requires", ignoreCase = true)) return true
+        if (summary.contains("No coherent conversation was detected", ignoreCase = true)) return true
+        if (summary.contains("No clear speech or conversation was detected", ignoreCase = true)) return true
+        if (summary.contains("contains only background noise", ignoreCase = true)) return true
+        // Autoregressive repetition loop check e.g. "शाशाशाशा..." or "শাশাশাশা..."
+        if (Regex("""([^\s]{1,4})\1{3,}""").containsMatchIn(cleanTrans)) return true
+        return false
+    }
+
     private suspend fun processAudioFile(
         context: Context,
         uri: Uri,
@@ -1063,8 +1078,9 @@ class CallViewModel(
                     }
                 }
 
-                // ── Mode 2: Try Gemini (if preferred, or if Cloudflare wasn't configured / failed) ─
-                val tryGemini = (currentEngine == PreferredEngine.GEMINI || transcription.isBlank()) && isApiKeyConfigured()
+                // ── Mode 2: Try Gemini (if preferred, or if Cloudflare wasn't configured / gave no speech in AUTO mode) ─
+                val cloudflareGaveNoSpeech = isUnusableTranscription(transcription, summary)
+                val tryGemini = (currentEngine == PreferredEngine.GEMINI || (currentEngine == PreferredEngine.AUTO && cloudflareGaveNoSpeech) || transcription.isBlank()) && isApiKeyConfigured()
                 if (tryGemini && fileSize <= MAX_FILE_SIZE_GEMINI) {
                     val bytes = audioBytes ?: readAudioBytes(context, uri, MAX_FILE_SIZE_GEMINI)
                     audioBytes = bytes
@@ -1080,8 +1096,10 @@ class CallViewModel(
 
                         if (geminiResult.isSuccess) {
                             val pair = geminiResult.getOrThrow()
-                            transcription = pair.first
-                            summary = pair.second
+                            if (!isUnusableTranscription(pair.first, pair.second) || transcription.isBlank() || transcription.contains("No audible speech detected", ignoreCase = true)) {
+                                transcription = pair.first
+                                summary = pair.second
+                            }
                         } else {
                             lastEngineError = geminiResult.exceptionOrNull()
                         }

@@ -81,13 +81,16 @@ export default {
         let whisperResult = await runWhisperWithFallback(env, audioUint8, language);
         let rawTranscription = (whisperResult.text || whisperResult.transcription || "").trim();
 
-        // If Whisper hallucinated an irrelevant foreign script (e.g. Korean, Cyrillic, Chinese) on Bengali/Hindi audio:
-        if (hasIrrelevantForeignScript(rawTranscription) && language !== "ko" && language !== "ru" && language !== "zh") {
-          console.warn(`Whisper misidentified language (${rawTranscription.slice(0, 40)}...). Retrying with Bengali focus...`);
+        // If Whisper hallucinated an irrelevant foreign script or got stuck in a repetition loop:
+        const needsRetry = (hasIrrelevantForeignScript(rawTranscription) && language !== "ko" && language !== "ru" && language !== "zh") ||
+                           isRepetitionLoop(rawTranscription);
+
+        if (needsRetry) {
+          console.warn(`Whisper hallucinated or looped (${rawTranscription.slice(0, 40)}...). Retrying with Bengali focus...`);
           try {
             const retryResult = await runWhisperWithFallback(env, audioUint8, "bn");
             const retryRaw = (retryResult.text || retryResult.transcription || "").trim();
-            if (retryRaw.length > 0 && !hasIrrelevantForeignScript(retryRaw)) {
+            if (retryRaw.length > 0 && !hasIrrelevantForeignScript(retryRaw) && !isRepetitionLoop(retryRaw)) {
               rawTranscription = retryRaw;
             }
           } catch (_) {}
@@ -187,13 +190,16 @@ export default {
         let whisperResult = await runWhisperWithFallback(env, audioBytes, language);
         let rawTranscription = (whisperResult.text || whisperResult.transcription || "").trim();
 
-        // If Whisper hallucinated an irrelevant foreign script (e.g. Korean, Cyrillic, Chinese) on Bengali/Hindi audio:
-        if (hasIrrelevantForeignScript(rawTranscription) && language !== "ko" && language !== "ru" && language !== "zh") {
-          console.warn(`Whisper misidentified language (${rawTranscription.slice(0, 40)}...). Retrying with Bengali focus...`);
+        // If Whisper hallucinated an irrelevant foreign script or got stuck in a repetition loop:
+        const needsRetry = (hasIrrelevantForeignScript(rawTranscription) && language !== "ko" && language !== "ru" && language !== "zh") ||
+                           isRepetitionLoop(rawTranscription);
+
+        if (needsRetry) {
+          console.warn(`Whisper hallucinated or looped (${rawTranscription.slice(0, 40)}...). Retrying with Bengali focus...`);
           try {
             const retryResult = await runWhisperWithFallback(env, audioBytes, "bn");
             const retryRaw = (retryResult.text || retryResult.transcription || "").trim();
-            if (retryRaw.length > 0 && !hasIrrelevantForeignScript(retryRaw)) {
+            if (retryRaw.length > 0 && !hasIrrelevantForeignScript(retryRaw) && !isRepetitionLoop(retryRaw)) {
               rawTranscription = retryRaw;
             }
           } catch (_) {}
@@ -230,7 +236,7 @@ const WHISPER_MODELS = [
   "@cf/openai/whisper",
 ];
 
-const BENGALI_HINDI_ENGLISH_PROMPT = "বাংলা, হিন্দি এবং ইংরেজি কথোপকথন। কেমন আছেন, ঠিক আছে, কি খবর, kya haal hai, namaste, hello, thanks.";
+const BENGALI_HINDI_ENGLISH_PROMPT = "বাংলা ভাষায় পরিষ্কার স্পষ্ট কথোপকথন। মা, বাবা, কেমন আছো, ঠিক আছে, কি করছো, হ্যাঁ, না, বলো, খাব, যাব। এবং হিন্দি ও English.";
 
 function hasIrrelevantForeignScript(text) {
   if (!text || typeof text !== "string") return false;
@@ -241,6 +247,45 @@ function hasIrrelevantForeignScript(text) {
 }
 
 /**
+ * Detects runaway autoregressive loops where Whisper repeats the same character,
+ * syllable, or short phrase indefinitely on background noise or silence.
+ */
+function isRepetitionLoop(text) {
+  if (!text || typeof text !== "string") return false;
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return false;
+
+  // 1. Any non-space sequence of 1-4 characters repeated 3 or more times back-to-back:
+  // e.g. "शाशाशाशा...", "শাশাশাশা...", "aaaa..."
+  if (/([^\s]{1,4})\1{2,}/u.test(trimmed)) {
+    return true;
+  }
+
+  // 2. Multi-char phrase repeating 3 or more times back-to-back:
+  // e.g. "হাঁনাহাঁনাহাঁনা", "hello hello hello"
+  if (/([^\s]{2,10})\1{2,}/u.test(trimmed)) {
+    return true;
+  }
+
+  // 3. Dominant single character check (single non-space char makes up >30% of a text >25 chars):
+  if (trimmed.length > 25) {
+    const counts = {};
+    let maxCharCount = 0;
+    for (const char of trimmed) {
+      if (!/\s/.test(char)) {
+        counts[char] = (counts[char] || 0) + 1;
+        if (counts[char] > maxCharCount) maxCharCount = counts[char];
+      }
+    }
+    if (maxCharCount / trimmed.length > 0.3) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
  * Runs Whisper with language steering, VAD, and model fallback.
  */
 async function runWhisperWithFallback(env, audioBytes, language = "auto") {
@@ -248,19 +293,21 @@ async function runWhisperWithFallback(env, audioBytes, language = "auto") {
     audio: [...audioBytes],
     vad_filter: true,
     condition_on_previous_text: false,
+    compression_ratio_threshold: 2.4,
+    hallucination_silence_threshold: 2.0,
   };
 
   if (language === "bn" || language === "bengali") {
     primaryOptions.language = "bn";
-    primaryOptions.initial_prompt = "বাংলা কথোপকথন। কেমন আছেন, ঠিক আছে, কি খবর, হ্যাঁ, না।";
+    primaryOptions.initial_prompt = "বাংলা ভাষায় পরিষ্কার কথোপকথন। মা, কেমন আছো, ঠিক আছে, কি করছো, হ্যাঁ, না, বলো।";
   } else if (language === "hi" || language === "hindi") {
     primaryOptions.language = "hi";
-    primaryOptions.initial_prompt = "हिंदी में बातचीत। क्या हाल है, नमस्ते, ठीक है, हाँ, नहीं।";
+    primaryOptions.initial_prompt = "हिंदी में साफ बातचीत। क्या हाल है, नमस्ते, ठीक है, हाँ, नहीं।";
   } else if (language === "en" || language === "english") {
     primaryOptions.language = "en";
-    primaryOptions.initial_prompt = "English phone call conversation between two people.";
+    primaryOptions.initial_prompt = "Clear English phone call conversation between two people.";
   } else {
-    // Auto multilingual: explicitly prime for Bengali, Hindi & English
+    // Auto multilingual: explicitly prime for Bengali first, then Hindi & English
     primaryOptions.initial_prompt = BENGALI_HINDI_ENGLISH_PROMPT;
   }
 
@@ -294,7 +341,7 @@ async function runWhisperWithFallback(env, audioBytes, language = "auto") {
 
 /**
  * Detects and removes Whisper hallucinations, infinite punctuation loops,
- * and silence artifacts.
+ * runaway character repetitions, and silence artifacts.
  */
 function cleanWhisperTranscript(rawText) {
   if (!rawText || typeof rawText !== "string") return "";
@@ -305,13 +352,19 @@ function cleanWhisperTranscript(rawText) {
   text = text.replace(/(?:\.\s*){3,}/g, "... ");
   text = text.replace(/(?:\.\.\.\s*){2,}/g, "... ");
 
+  // 2. Collapse runaway character / syllable repetitions without spaces (e.g. "वाशाशाशाशाशा..." -> "वाशा")
+  text = text.replace(/([^\s]{1,4})\1{2,}/gu, "$1");
+
+  // 3. Collapse runaway multi-char repetitions without spaces (e.g. "abcdefabcdefabcdef" -> "abcdef")
+  text = text.replace(/([^\s]{5,12})\1{1,}/gu, "$1");
+
   // Check if text has virtually no alphanumeric content (e.g. only dots, dashes, commas)
   const alphaNumericOnly = text.replace(/[\s\.\,\!\?\-\:\;\(\)\[\]\"\'\…\·\•\*\~\_]/g, "");
   if (alphaNumericOnly.length < 2) {
     return "";
   }
 
-  // 2. Remove consecutive duplicate sentences (e.g. "날 저갈더스타! 날 저갈더스타!")
+  // 4. Remove consecutive duplicate sentences (e.g. "날 저갈더스타! 날 저갈더스타!")
   const sentences = text.split(/(?<=[.!?\n])\s+/).filter(s => s.trim().length > 0);
   if (sentences.length >= 2) {
     const deduplicated = [];
@@ -335,10 +388,10 @@ function cleanWhisperTranscript(rawText) {
     text = deduplicated.join(" ");
   }
 
-  // 3. Remove consecutive duplicate words or short phrases (e.g. "Thank you. Thank you. Thank you.")
-  text = text.replace(/\b([a-zA-Z0-9\p{L}]{2,}(?:\s+[a-zA-Z0-9\p{L}]{2,}){0,3})\s+(?:\1\s+){2,}\1\b/gui, "$1");
+  // 5. Remove consecutive duplicate words or short phrases with spaces (e.g. "Thank you. Thank you. Thank you.")
+  text = text.replace(/\b([a-zA-Z0-9\p{L}]{1,}(?:\s+[a-zA-Z0-9\p{L}]{1,}){0,3})\s+(?:\1\s*){2,}/gui, "$1 ");
 
-  // 4. Known Whisper silence/noise hallucinations
+  // 6. Known Whisper silence/noise hallucinations
   const lower = text.toLowerCase().trim();
   const knownHallucinations = [
     /^\[?\(?(?:music|applause|laughter|silence|cheering|coughing|groan|sigh)\)?\]?$/i,
@@ -351,7 +404,7 @@ function cleanWhisperTranscript(rawText) {
     }
   }
 
-  // 5. If text still contains irrelevant foreign scripts (Korean, Cyrillic, Chinese, etc.):
+  // 7. If text still contains irrelevant foreign scripts (Korean, Cyrillic, Chinese, etc.):
   if (hasIrrelevantForeignScript(text)) {
     const validSouthAsianOrLatin = text.replace(/[^\u0980-\u09ff\u0900-\u097fa-zA-Z0-9]/gu, "");
     if (validSouthAsianOrLatin.length < 5) {
@@ -359,7 +412,12 @@ function cleanWhisperTranscript(rawText) {
     }
   }
 
-  // 6. Final check: if alphanumeric characters count is less than 2, it's silence
+  // 8. If after cleaning the text is still detected as a repetition loop:
+  if (isRepetitionLoop(text)) {
+    return "";
+  }
+
+  // 9. Final check: if alphanumeric characters count is less than 2, it's silence
   const finalAlpha = text.replace(/[^\p{L}\p{N}]/gu, "");
   if (finalAlpha.length < 2) {
     return "";
