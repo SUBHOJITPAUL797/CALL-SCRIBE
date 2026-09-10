@@ -88,7 +88,7 @@ object RetrofitClient {
     private const val BASE_URL = "https://generativelanguage.googleapis.com/"
 
     private val okHttpClient = OkHttpClient.Builder()
-        .connectTimeout(90, TimeUnit.SECONDS)
+        .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
         .writeTimeout(120, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
@@ -133,6 +133,13 @@ object GeminiResponseParser {
                     transcription.ifBlank { "No transcription content." },
                     summary.ifBlank { "No summary generated." }
                 )
+            } else {
+                val summary = trimmed.substring(summaryStart, transcriptionMatch.range.first).trim()
+                val transcription = trimmed.substring(transcriptionStart).trim()
+                return Pair(
+                    transcription.ifBlank { "No transcription content." },
+                    summary.ifBlank { "No summary generated." }
+                )
             }
         } else if (summaryMatch != null) {
             val summaryHeaderStart = summaryMatch.range.first
@@ -153,16 +160,12 @@ class GeminiRepository(
     private val apiKeyProvider: () -> String = { BuildConfig.GEMINI_API_KEY }
 ) {
     companion object {
-        // Modern models in order of priority for freshly created & existing Google AI Studio keys
+        // Modern models in order of priority (reliable production models first)
         val CANDIDATE_MODELS = listOf(
-            "gemini-3.8-flash",
-            "gemini-3.5-flash",
-            "gemini-3.5-flash-lite",
-            "gemini-3.7-flash",
-            "gemini-3.1-pro",
-            "gemini-2.5-flash",
             "gemini-2.0-flash",
-            "gemini-1.5-flash"
+            "gemini-1.5-flash",
+            "gemini-1.5-pro",
+            "gemini-2.5-flash"
         )
     }
 
@@ -379,6 +382,7 @@ Do NOT skip any section. Do NOT summarize too briefly. The user needs to know ev
             }
             Result.failure(exception)
         } catch (e: Throwable) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(Exception(e.localizedMessage ?: "Unknown error occurred during analysis", e))
         }
     }
@@ -418,6 +422,7 @@ Do NOT skip any section. Do NOT summarize too briefly. The user needs to know ev
                 Result.failure(Exception("HTTP $code: $errorMsg"))
             }
         } catch (e: Throwable) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(Exception(e.localizedMessage ?: "Connection error", e))
         }
     }
@@ -469,6 +474,7 @@ Do NOT skip any section. Do NOT summarize too briefly. The user needs to know ev
                 Result.failure(Exception("No answer received from Gemini."))
             }
         } catch (e: Throwable) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(e)
         }
     }

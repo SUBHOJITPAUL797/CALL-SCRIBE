@@ -16,24 +16,37 @@ import android.util.Base64
 import androidx.room.Index
 
 object SimpleEncryption {
+    private const val PREFIX = "b64v1:"
+
     fun encrypt(str: String): String {
         return try {
-            android.util.Base64.encodeToString(str.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
-        } catch (_: Throwable) {
-            java.util.Base64.getEncoder().encodeToString(str.toByteArray(Charsets.UTF_8))
+            val encoded = try {
+                android.util.Base64.encodeToString(str.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+            } catch (_: Throwable) {
+                java.util.Base64.getEncoder().encodeToString(str.toByteArray(Charsets.UTF_8))
+            }
+            "$PREFIX$encoded"
+        } catch (_: Exception) {
+            str
         }
     }
 
-    fun decrypt(base64Str: String): String {
-        if (base64Str.isBlank()) return ""
+    fun decrypt(encodedStr: String): String {
+        if (encodedStr.isBlank()) return ""
+        val payload = if (encodedStr.startsWith(PREFIX)) {
+            encodedStr.removePrefix(PREFIX)
+        } else {
+            // Legacy un-prefixed Base64 or plain text
+            encodedStr
+        }
         return try {
             try {
-                String(android.util.Base64.decode(base64Str.trim(), android.util.Base64.DEFAULT), Charsets.UTF_8)
+                String(android.util.Base64.decode(payload.trim(), android.util.Base64.DEFAULT), Charsets.UTF_8)
             } catch (_: Throwable) {
-                String(java.util.Base64.getDecoder().decode(base64Str.trim()), Charsets.UTF_8)
+                String(java.util.Base64.getDecoder().decode(payload.trim()), Charsets.UTF_8)
             }
-        } catch (e: Exception) {
-            base64Str
+        } catch (_: Exception) {
+            encodedStr
         }
     }
 }

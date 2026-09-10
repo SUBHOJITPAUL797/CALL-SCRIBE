@@ -22,6 +22,7 @@ import com.example.data.Recording
 import com.example.data.SimpleEncryption
 import com.example.di.DefaultAppContainer
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.withLock
 import java.io.ByteArrayOutputStream
@@ -75,25 +76,33 @@ class CallSyncWorker(
                 audioFiles.sortByDescending { it.lastModified }
 
                 for (fileInfo in audioFiles) {
+                    if (isStopped || !coroutineContext.isActive) break
+
                     // Skip 0-byte files (e.g. actively being recorded by call recorder)
                     if (fileInfo.size <= 0L) continue
 
                     val fileUriStr = fileInfo.uri.toString()
                     val existing = repository.getByUri(fileUriStr)
 
-                    // Only consider newly discovered audio files
-                    if (existing != null) continue
+                    // If already successfully analyzed with non-blank transcription, skip it
+                    if (existing != null && existing.decodedTranscription.isNotBlank() && !isUnusableTranscription(existing.decodedTranscription, existing.decodedSummary)) {
+                        continue
+                    }
 
-                    // 1. Immediately insert placeholder recording into Room so it appears in the app
-                    val placeholder = Recording(
-                        id = 0,
-                        title = fileInfo.name,
-                        contentEncrypted = SimpleEncryption.encrypt(""),
-                        summaryEncrypted = SimpleEncryption.encrypt("Pending AI Analysis\n\nTap ⚡ Transcribe & Analyze Call to view insights."),
-                        timestamp = if (fileInfo.lastModified > 0) fileInfo.lastModified else System.currentTimeMillis(),
-                        sourceUri = fileUriStr
-                    )
-                    val insertedId = repository.insert(placeholder).toInt()
+                    // 1. If placeholder already exists, reuse its ID; otherwise insert placeholder into Room
+                    val insertedId = if (existing != null) {
+                        existing.id
+                    } else {
+                        val placeholder = Recording(
+                            id = 0,
+                            title = fileInfo.name,
+                            contentEncrypted = SimpleEncryption.encrypt(""),
+                            summaryEncrypted = SimpleEncryption.encrypt("Pending AI Analysis\n\nTap ⚡ Transcribe & Analyze Call to view insights."),
+                            timestamp = if (fileInfo.lastModified > 0) fileInfo.lastModified else System.currentTimeMillis(),
+                            sourceUri = fileUriStr
+                        )
+                        repository.insert(placeholder).toInt()
+                    }
 
                     // 2. Check if this call matches the user's Auto-Analyze rule
                     val shouldAutoAnalyze = CallMetadataParser.matchesAutoAnalyzeRule(fileInfo.name, mode, targets)
@@ -170,6 +179,9 @@ class CallSyncWorker(
             } catch (_: SecurityException) {
                 // Folder permission was revoked; do not retry indefinitely
                 Result.failure()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // Cooperative WorkManager cancellation - do NOT swallow or retry
+                throw e
             } catch (t: Throwable) {
                 Result.retry()
             }
@@ -252,6 +264,8 @@ class CallSyncWorker(
             for (subDirDocId in subDirs) {
                 scanDirectoryRecursively(context, treeUri, subDirDocId, results, currentDepth + 1, maxDepth)
             }
+        } catch (e: SecurityException) {
+            throw e
         } catch (_: Exception) {
         }
     }
@@ -403,6 +417,9 @@ class CallSyncWorker(
                 }
                 buffer.toByteArray()
             }
+        } catch (_: OutOfMemoryError) {
+            System.gc()
+            null
         } catch (_: Exception) {
             null
         }
@@ -413,12 +430,17 @@ class CallSyncWorker(
         const val WORK_NAME_ONE_TIME = "call_scribe_one_time_sync"
 
         fun schedulePeriodicSync(context: Context) {
+            val constraints = Constraints.Builder()
+                .setRequiredNetworkType(NetworkType.CONNECTED)
+                .build()
+
             val workRequest = PeriodicWorkRequestBuilder<CallSyncWorker>(15, TimeUnit.MINUTES)
+                .setConstraints(constraints)
                 .build()
 
             WorkManager.getInstance(context.applicationContext).enqueueUniquePeriodicWork(
                 WORK_NAME_PERIODIC,
-                ExistingPeriodicWorkPolicy.KEEP,
+                ExistingPeriodicWorkPolicy.UPDATE,
                 workRequest
             )
         }

@@ -40,7 +40,10 @@ data class AppUpdateInfo(
 )
 
 interface GitHubApiService {
-    @Headers("Accept: application/vnd.github.v3+json")
+    @Headers(
+        "Accept: application/vnd.github.v3+json",
+        "User-Agent: CallScribe-App"
+    )
     @GET("repos/{owner}/{repo}/releases/latest")
     suspend fun getLatestRelease(
         @Path("owner") owner: String,
@@ -110,7 +113,7 @@ class GitHubUpdateRepository(
                 it.name.contains(cleanLatest) && it.name.endsWith(".apk", ignoreCase = true)
             } ?: release.assets.firstOrNull {
                 it.name.endsWith(".apk", ignoreCase = true)
-            } ?: release.assets.firstOrNull()
+            }
 
             val info = AppUpdateInfo(
                 hasUpdate = isNewer && !isSkipped,
@@ -124,6 +127,7 @@ class GitHubUpdateRepository(
             )
             Result.success(info)
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(e)
         }
     }

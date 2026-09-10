@@ -87,12 +87,25 @@ class GeminiParserTest {
     }
 
     @Test
-    fun testCandidateModelsContainsGemini3Series() {
+    fun testSimpleEncryptionLegacyCompatibility() {
+        // Legacy un-prefixed Base64 encoded "Hello World"
+        val legacyBase64 = java.util.Base64.getEncoder().encodeToString("Hello World".toByteArray(Charsets.UTF_8))
+        val decrypted = SimpleEncryption.decrypt(legacyBase64)
+        assertEquals("Hello World", decrypted)
+
+        // Raw plain text without prefix or valid Base64
+        val rawPlainText = "Just plain text transcript without base64"
+        val decryptedRaw = SimpleEncryption.decrypt(rawPlainText)
+        assertEquals(rawPlainText, decryptedRaw)
+    }
+
+    @Test
+    fun testCandidateModelsContainsProductionModels() {
         val candidates = GeminiRepository.CANDIDATE_MODELS
-        assertTrue("Candidate models must contain gemini-3.8-flash", candidates.contains("gemini-3.8-flash"))
-        assertTrue("Candidate models must contain gemini-3.5-flash", candidates.contains("gemini-3.5-flash"))
-        assertTrue("Candidate models must contain gemini-3.5-flash-lite", candidates.contains("gemini-3.5-flash-lite"))
-        assertEquals("gemini-3.8-flash should be top priority fallback", "gemini-3.8-flash", candidates.first())
+        assertTrue("Candidate models must contain gemini-2.0-flash", candidates.contains("gemini-2.0-flash"))
+        assertTrue("Candidate models must contain gemini-1.5-flash", candidates.contains("gemini-1.5-flash"))
+        assertTrue("Candidate models must contain gemini-1.5-pro", candidates.contains("gemini-1.5-pro"))
+        assertEquals("gemini-2.0-flash should be top priority fallback", "gemini-2.0-flash", candidates.first())
     }
 
     @Test

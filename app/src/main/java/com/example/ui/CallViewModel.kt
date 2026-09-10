@@ -286,13 +286,23 @@ class CallViewModel(
         completedActionItemKeys.value = updated
     }
 
+    private var chatJob: Job? = null
+
+    private fun hasValidTranscript(transcription: String): Boolean {
+        if (transcription.isBlank()) return false
+        val lower = transcription.lowercase()
+        return !lower.contains("audio transcription required") &&
+               !lower.contains("transcription requires") &&
+               !lower.contains("ai analysis not available") &&
+               !lower.contains("on-device speech analysis") &&
+               !lower.contains("no audible speech detected") &&
+               !lower.contains("tap 🔑")
+    }
+
     // --- Chat With Call Methods ---
     fun openChat(recording: Recording) {
         activeChatRecording.value = recording
-        val hasRealTranscript = recording.decodedTranscription.isNotBlank() &&
-            !recording.decodedTranscription.contains("Transcription requires") &&
-            !recording.decodedTranscription.contains("API Key") &&
-            !recording.decodedTranscription.contains("On-Device Speech Analysis")
+        val hasRealTranscript = hasValidTranscript(recording.decodedTranscription)
 
         val mode = when {
             preferredEngine.value == PreferredEngine.CLOUDFLARE && isCloudflareConfigured() -> "Cloudflare AI"
@@ -321,6 +331,8 @@ class CallViewModel(
     }
 
     fun closeChat() {
+        chatJob?.cancel()
+        chatJob = null
         activeChatRecording.value = null
         chatMessages.value = emptyList()
         isChatLoading.value = false
@@ -336,10 +348,7 @@ class CallViewModel(
         chatMessages.value = currentList
         isChatLoading.value = true
 
-        val hasRealTranscript = recording.decodedTranscription.isNotBlank() &&
-            !recording.decodedTranscription.contains("Transcription requires") &&
-            !recording.decodedTranscription.contains("API Key") &&
-            !recording.decodedTranscription.contains("On-Device Speech Analysis")
+        val hasRealTranscript = hasValidTranscript(recording.decodedTranscription)
 
         if (!hasRealTranscript) {
             val reply = if ((isApiKeyConfigured() || isCloudflareConfigured()) && recording.sourceUri != null) {
@@ -354,119 +363,129 @@ class CallViewModel(
             return
         }
 
-        viewModelScope.launch {
-            val currentEngine = preferredEngine.value
-            val answer = when {
-                // 1. Explicit On-Device offline selection
-                currentEngine == PreferredEngine.ON_DEVICE -> {
-                    LocalAnalysisEngine.answerCallQuestionLocally(
-                        recording.decodedTranscription, recording.decodedSummary, cleanQuestion
-                    )
-                }
-
-                // 2. Cloudflare Worker preferred
-                currentEngine == PreferredEngine.CLOUDFLARE && isCloudflareConfigured() -> {
-                    val cfRes = cloudflareRepository?.chatWithCall(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
-                    cfRes?.getOrElse {
-                        if (isApiKeyConfigured()) {
-                            geminiRepository.chatWithCall(recording.decodedTranscription, recording.decodedSummary, cleanQuestion).getOrDefault("No answer")
-                        } else {
-                            LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
-                        }
-                    } ?: LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
-                }
-
-                // 3. NVIDIA preferred
-                currentEngine == PreferredEngine.NVIDIA && isNvidiaKeyConfigured() -> {
-                    val nvidiaResult = nvidiaRepository?.chatWithCall(
-                        transcript = recording.decodedTranscription,
-                        summary = recording.decodedSummary,
-                        question = cleanQuestion
-                    )
-                    nvidiaResult?.getOrElse {
-                        if (isCloudflareConfigured()) {
-                            cloudflareRepository?.chatWithCall(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)?.getOrDefault("No answer")
-                                ?: LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
-                        } else if (isApiKeyConfigured()) {
-                            geminiRepository.chatWithCall(recording.decodedTranscription, recording.decodedSummary, cleanQuestion).getOrDefault("No answer")
-                        } else {
-                            LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
-                        }
-                    } ?: LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
-                }
-
-                // 4. Gemini preferred
-                currentEngine == PreferredEngine.GEMINI && isApiKeyConfigured() -> {
-                    val geminiResult = geminiRepository.chatWithCall(
-                        transcript = recording.decodedTranscription,
-                        summary = recording.decodedSummary,
-                        question = cleanQuestion
-                    )
-                    if (geminiResult.isSuccess) {
-                        geminiResult.getOrThrow()
-                    } else if (isCloudflareConfigured()) {
-                        cloudflareRepository?.chatWithCall(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)?.getOrElse {
-                            LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
-                        } ?: LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
-                    } else {
-                        LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
-                    }
-                }
-
-                // 5. AUTO mode or fallback: Cloudflare first if configured
-                isCloudflareConfigured() -> {
-                    val cfResult = cloudflareRepository?.chatWithCall(
-                        transcript = recording.decodedTranscription,
-                        summary = recording.decodedSummary,
-                        question = cleanQuestion
-                    )
-                    cfResult?.getOrElse {
-                        if (isApiKeyConfigured()) {
-                            geminiRepository.chatWithCall(recording.decodedTranscription, recording.decodedSummary, cleanQuestion).getOrDefault("No answer")
-                        } else {
-                            LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
-                        }
-                    } ?: LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
-                }
-
-                // 6. Gemini fallback
-                isApiKeyConfigured() -> {
-                    val geminiResult = geminiRepository.chatWithCall(
-                        transcript = recording.decodedTranscription,
-                        summary = recording.decodedSummary,
-                        question = cleanQuestion
-                    )
-                    if (geminiResult.isSuccess) {
-                        geminiResult.getOrThrow()
-                    } else {
-                        LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
-                    }
-                }
-
-                // 7. NVIDIA fallback
-                isNvidiaKeyConfigured() -> {
-                    val nvidiaResult = nvidiaRepository?.chatWithCall(
-                        transcript = recording.decodedTranscription,
-                        summary = recording.decodedSummary,
-                        question = cleanQuestion
-                    )
-                    nvidiaResult?.getOrElse {
+        chatJob?.cancel()
+        chatJob = viewModelScope.launch {
+            try {
+                val currentEngine = preferredEngine.value
+                val answer = when {
+                    // 1. Explicit On-Device offline selection
+                    currentEngine == PreferredEngine.ON_DEVICE -> {
                         LocalAnalysisEngine.answerCallQuestionLocally(
                             recording.decodedTranscription, recording.decodedSummary, cleanQuestion
                         )
-                    } ?: LocalAnalysisEngine.answerCallQuestionLocally(
+                    }
+
+                    // 2. Cloudflare Worker preferred
+                    currentEngine == PreferredEngine.CLOUDFLARE && isCloudflareConfigured() -> {
+                        val cfRes = cloudflareRepository?.chatWithCall(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
+                        cfRes?.getOrElse {
+                            if (isApiKeyConfigured()) {
+                                geminiRepository.chatWithCall(recording.decodedTranscription, recording.decodedSummary, cleanQuestion).getOrDefault("No answer")
+                            } else {
+                                LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
+                            }
+                        } ?: LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
+                    }
+
+                    // 3. NVIDIA preferred
+                    currentEngine == PreferredEngine.NVIDIA && isNvidiaKeyConfigured() -> {
+                        val nvidiaResult = nvidiaRepository?.chatWithCall(
+                            transcript = recording.decodedTranscription,
+                            summary = recording.decodedSummary,
+                            question = cleanQuestion
+                        )
+                        nvidiaResult?.getOrElse {
+                            if (isCloudflareConfigured()) {
+                                cloudflareRepository?.chatWithCall(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)?.getOrDefault("No answer")
+                                    ?: LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
+                            } else if (isApiKeyConfigured()) {
+                                geminiRepository.chatWithCall(recording.decodedTranscription, recording.decodedSummary, cleanQuestion).getOrDefault("No answer")
+                            } else {
+                                LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
+                            }
+                        } ?: LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
+                    }
+
+                    // 4. Gemini preferred
+                    currentEngine == PreferredEngine.GEMINI && isApiKeyConfigured() -> {
+                        val geminiResult = geminiRepository.chatWithCall(
+                            transcript = recording.decodedTranscription,
+                            summary = recording.decodedSummary,
+                            question = cleanQuestion
+                        )
+                        if (geminiResult.isSuccess) {
+                            geminiResult.getOrThrow()
+                        } else if (isCloudflareConfigured()) {
+                            cloudflareRepository?.chatWithCall(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)?.getOrElse {
+                                LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
+                            } ?: LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
+                        } else {
+                            LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
+                        }
+                    }
+
+                    // 5. AUTO mode or fallback: Cloudflare first if configured
+                    isCloudflareConfigured() -> {
+                        val cfResult = cloudflareRepository?.chatWithCall(
+                            transcript = recording.decodedTranscription,
+                            summary = recording.decodedSummary,
+                            question = cleanQuestion
+                        )
+                        cfResult?.getOrElse {
+                            if (isApiKeyConfigured()) {
+                                geminiRepository.chatWithCall(recording.decodedTranscription, recording.decodedSummary, cleanQuestion).getOrDefault("No answer")
+                            } else {
+                                LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
+                            }
+                        } ?: LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
+                    }
+
+                    // 6. Gemini fallback
+                    isApiKeyConfigured() -> {
+                        val geminiResult = geminiRepository.chatWithCall(
+                            transcript = recording.decodedTranscription,
+                            summary = recording.decodedSummary,
+                            question = cleanQuestion
+                        )
+                        if (geminiResult.isSuccess) {
+                            geminiResult.getOrThrow()
+                        } else {
+                            LocalAnalysisEngine.answerCallQuestionLocally(recording.decodedTranscription, recording.decodedSummary, cleanQuestion)
+                        }
+                    }
+
+                    // 7. NVIDIA fallback
+                    isNvidiaKeyConfigured() -> {
+                        val nvidiaResult = nvidiaRepository?.chatWithCall(
+                            transcript = recording.decodedTranscription,
+                            summary = recording.decodedSummary,
+                            question = cleanQuestion
+                        )
+                        nvidiaResult?.getOrElse {
+                            LocalAnalysisEngine.answerCallQuestionLocally(
+                                recording.decodedTranscription, recording.decodedSummary, cleanQuestion
+                            )
+                        } ?: LocalAnalysisEngine.answerCallQuestionLocally(
+                            recording.decodedTranscription, recording.decodedSummary, cleanQuestion
+                        )
+                    }
+
+                    // 8. On-device
+                    else -> LocalAnalysisEngine.answerCallQuestionLocally(
                         recording.decodedTranscription, recording.decodedSummary, cleanQuestion
                     )
                 }
 
-                // 8. On-device
-                else -> LocalAnalysisEngine.answerCallQuestionLocally(
-                    recording.decodedTranscription, recording.decodedSummary, cleanQuestion
+                chatMessages.value = chatMessages.value + ChatMessage(MessageSender.AI, answer)
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                chatMessages.value = chatMessages.value + ChatMessage(
+                    MessageSender.AI,
+                    "⚠️ Could not answer question: ${e.localizedMessage ?: "Unknown error"}"
                 )
+            } finally {
+                isChatLoading.value = false
             }
-
-            chatMessages.value = chatMessages.value + ChatMessage(MessageSender.AI, answer)
-            isChatLoading.value = false
         }
     }
 
@@ -600,13 +619,7 @@ class CallViewModel(
     }
 
     fun openCallerProfileForRecording(recording: Recording) {
-        val meta = CallMetadataParser.parse(recording.title)
-        val digits = meta.cleanTitle.filter { it.isDigit() }
-        val key = if (digits.length >= 6 && meta.cleanTitle.all { it.isDigit() || it == '+' || it == ' ' || it == '-' || it == '(' || it == ')' }) {
-            digits
-        } else {
-            meta.cleanTitle.trim().lowercase(java.util.Locale.ROOT)
-        }
+        val key = CallerProfileBuilder.computeCallerKey(recording.title)
         openCallerProfile(key)
     }
 
@@ -615,12 +628,13 @@ class CallViewModel(
     }
 
     fun toggleCallerAutoAnalyze(callerTarget: String) {
+        val cleanTarget = callerTarget.trim()
         val targets = autoAnalyzeTargets.value
-        val isAlready = targets.any { it.equals(callerTarget, ignoreCase = true) }
+        val isAlready = targets.any { it.equals(cleanTarget, ignoreCase = true) }
         if (isAlready) {
-            removeAutoAnalyzeTarget(callerTarget)
+            removeAutoAnalyzeTarget(cleanTarget)
         } else {
-            addAutoAnalyzeTarget(callerTarget)
+            addAutoAnalyzeTarget(cleanTarget)
         }
     }
 
@@ -676,10 +690,7 @@ class CallViewModel(
                     var pendingCount = 0
                     for (file in audioFiles) {
                         val existing = repository.getByUri(file.uri.toString())
-                        val hasReal = existing != null &&
-                            existing.decodedTranscription.isNotBlank() &&
-                            !existing.decodedTranscription.contains("Transcription requires") &&
-                            !existing.decodedTranscription.contains("On-Device Speech Analysis")
+                        val hasReal = existing != null && hasValidTranscript(existing.decodedTranscription)
                         if (!hasReal) {
                             pendingCount++
                         }
@@ -810,10 +821,7 @@ class CallViewModel(
                             if (file.size <= 0L) continue
 
                             val existing = repository.getByUri(file.uri.toString())
-                            val hasRealTranscript = existing != null &&
-                                existing.decodedTranscription.isNotBlank() &&
-                                !existing.decodedTranscription.contains("Transcription requires") &&
-                                !existing.decodedTranscription.contains("On-Device Speech Analysis")
+                            val hasRealTranscript = existing != null && hasValidTranscript(existing.decodedTranscription)
 
                             if (hasRealTranscript) {
                                 alreadyAnalyzedCount++
@@ -857,7 +865,8 @@ class CallViewModel(
                             fileInfo.name,
                             fileInfo.mimeType,
                             fileInfo.size,
-                            existingId = existing?.id
+                            existingId = existing?.id,
+                            fileLastModified = fileInfo.lastModified
                         )
 
                         if (processResult.isSuccess) {
@@ -895,10 +904,12 @@ class CallViewModel(
                     if (t !is kotlinx.coroutines.CancellationException) {
                         syncStatus.value = "Sync failed: ${t.localizedMessage ?: t.javaClass.simpleName}"
                     }
-                } finally {
-                    kotlinx.coroutines.delay(2500)
-                    isSyncing.value = false
                 }
+            } // end mutex withLock
+
+            withContext(kotlinx.coroutines.NonCancellable) {
+                kotlinx.coroutines.delay(1000)
+                isSyncing.value = false
             }
         }
     }
@@ -1033,7 +1044,8 @@ class CallViewModel(
         fileName: String,
         mimeType: String?,
         fileSize: Long,
-        existingId: Int? = null
+        existingId: Int? = null,
+        fileLastModified: Long = 0L
     ): Result<Unit> {
         return try {
             val contentResolver = context.contentResolver
@@ -1049,13 +1061,7 @@ class CallViewModel(
             if (currentEngine == PreferredEngine.ON_DEVICE) {
                 val existingTranscript = if (existingId != null) {
                     val prev = repository.getById(existingId)
-                    prev?.decodedTranscription?.takeIf {
-                        it.isNotBlank() &&
-                        !it.contains("Audio Transcription Required") &&
-                        !it.contains("Transcription requires") &&
-                        !it.contains("Not Available") &&
-                        !it.contains("On-Device Speech Analysis")
-                    } ?: ""
+                    prev?.decodedTranscription?.takeIf { hasValidTranscript(it) } ?: ""
                 } else ""
                 val (localTrans, localSum) = LocalAnalysisEngine.analyzeLocally(existingTranscript, fileName)
                 transcription = localTrans
@@ -1154,8 +1160,7 @@ class CallViewModel(
 
                 // ── Mode 6: Local on-device fallback if cloud engines are unconfigured or failed ──
                 if (transcription.isBlank()) {
-                    if (existingId != null && currentEngine != PreferredEngine.ON_DEVICE) {
-                        // User explicitly requested re-analysis using a cloud engine, and it failed
+                    if (currentEngine != PreferredEngine.ON_DEVICE) {
                         return Result.failure(lastEngineError ?: Exception("Could not analyze call. Check AI Engine settings or network connection."))
                     }
                     val (localTrans, localSum) = LocalAnalysisEngine.analyzeLocally("", fileName)
@@ -1168,31 +1173,21 @@ class CallViewModel(
             }
 
             val existingTimestamp = existingId?.let { withContext(Dispatchers.IO) { repository.getById(it)?.timestamp } }
+            val finalTimestamp = if (fileLastModified > 0) fileLastModified else (existingTimestamp ?: System.currentTimeMillis())
+
             val recording = Recording(
                 id = existingId ?: 0,
                 title = fileName,
                 contentEncrypted = SimpleEncryption.encrypt(transcription),
                 summaryEncrypted = SimpleEncryption.encrypt(summary),
-                timestamp = existingTimestamp ?: System.currentTimeMillis(),
+                timestamp = finalTimestamp,
                 sourceUri = uri.toString()
             )
             repository.insert(recording)
             Result.success(Unit)
         } catch (t: Throwable) {
-            // Absolute safety net — NEVER lose a recording entry
-            try {
-                val (localTrans, localSum) = LocalAnalysisEngine.analyzeLocally("", fileName)
-                repository.insert(Recording(
-                    id = existingId ?: 0,
-                    title = fileName,
-                    contentEncrypted = SimpleEncryption.encrypt(localTrans),
-                    summaryEncrypted = SimpleEncryption.encrypt(localSum),
-                    sourceUri = uri.toString()
-                ))
-                Result.success(Unit)
-            } catch (e: Exception) {
-                Result.failure(t)
-            }
+            if (t is kotlinx.coroutines.CancellationException) throw t
+            Result.failure(t)
         }
     }
 
@@ -1206,21 +1201,24 @@ class CallViewModel(
         viewModelScope.launch {
             updateStatusMessage.value = "Analyzing '${CallMetadataParser.cleanCallTitle(recording.title)}'..."
             val result = withContext(Dispatchers.IO) {
-                try {
-                    val uri = Uri.parse(uriStr)
-                    val fileSize = try {
-                        context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: 0L
-                    } catch (_: Exception) { 0L }
-                    val mime = context.contentResolver.getType(uri) ?: "audio/mp3"
-                    processAudioFile(
-                        context = context.applicationContext,
-                        uri = uri,
-                        fileName = recording.title,
-                        mimeType = mime,
-                        fileSize = fileSize,
-                        existingId = recording.id
-                    )
-                } catch (e: Exception) { Result.failure(e) }
+                SyncLock.mutex.withLock {
+                    try {
+                        val uri = Uri.parse(uriStr)
+                        val fileSize = try {
+                            context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: 0L
+                        } catch (_: Exception) { 0L }
+                        val mime = context.contentResolver.getType(uri) ?: "audio/mp3"
+                        processAudioFile(
+                            context = context.applicationContext,
+                            uri = uri,
+                            fileName = recording.title,
+                            mimeType = mime,
+                            fileSize = fileSize,
+                            existingId = recording.id,
+                            fileLastModified = recording.timestamp
+                        )
+                    } catch (e: Exception) { Result.failure(e) }
+                }
             }
 
             if (result.isSuccess) {
@@ -1290,6 +1288,8 @@ class CallViewModel(
             data = CalendarContract.Events.CONTENT_URI
             putExtra(CalendarContract.Events.TITLE, "Call: $cleanTitle")
             putExtra(CalendarContract.Events.DESCRIPTION, description)
+            putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, recording.timestamp)
+            putExtra(CalendarContract.EXTRA_EVENT_END_TIME, recording.timestamp + 30 * 60 * 1000)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         try {

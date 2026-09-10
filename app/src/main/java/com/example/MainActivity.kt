@@ -5,11 +5,16 @@ import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -161,17 +166,29 @@ fun CallScribeApp(viewModel: CallViewModel) {
 
     val callerProfiles by viewModel.callerProfiles.collectAsStateWithLifecycle()
     val selectedCallerProfile by viewModel.selectedCallerProfile.collectAsStateWithLifecycle()
-    var currentTab by remember { mutableIntStateOf(0) }
+    var currentTab by rememberSaveable { mutableIntStateOf(0) }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { _ -> }
 
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.checkForNewRecordingsOnResume(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
     LaunchedEffect(Unit) {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
-        viewModel.checkForNewRecordingsOnResume(context)
     }
 
     val selectedFolderForLimit by viewModel.selectedFolderForLimit.collectAsStateWithLifecycle()
@@ -254,9 +271,30 @@ fun CallScribeApp(viewModel: CallViewModel) {
         }
     }
 
+    BackHandler(
+        enabled = activeChatRecording != null ||
+            selectedCallerProfile != null ||
+            recordingToDelete != null ||
+            showApiKeyDialog ||
+            showRulesDialog ||
+            selectedFolderForLimit != null ||
+            searchQuery.isNotBlank() ||
+            currentTab != 0
+    ) {
+        when {
+            activeChatRecording != null -> viewModel.closeChat()
+            selectedCallerProfile != null -> viewModel.closeCallerProfile()
+            recordingToDelete != null -> recordingToDelete = null
+            showApiKeyDialog -> viewModel.dismissApiKeyDialog()
+            showRulesDialog -> viewModel.dismissRulesDialog()
+            selectedFolderForLimit != null -> viewModel.dismissLimitDialog()
+            searchQuery.isNotBlank() -> viewModel.updateSearchQuery("")
+            currentTab != 0 -> currentTab = 0
+        }
+    }
+
     // Chat with Call Dialog (BottomSheet-style full dialog)
-    if (activeChatRecording != null) {
-        val chatRec = activeChatRecording!!
+    activeChatRecording?.let { chatRec ->
         var chatInput by remember { mutableStateOf("") }
         val quickChips = listOf(
             "What are the action items?",
@@ -502,7 +540,7 @@ fun CallScribeApp(viewModel: CallViewModel) {
                     )
                     Spacer(Modifier.height(6.dp))
 
-                    PreferredEngine.values().forEach { engine ->
+                    PreferredEngine.entries.forEach { engine ->
                         val isSelected = (selectedEngine == engine)
                         Surface(
                             modifier = Modifier
@@ -545,7 +583,7 @@ fun CallScribeApp(viewModel: CallViewModel) {
                     )
                     Spacer(Modifier.height(6.dp))
 
-                    for (lang in SpokenLanguage.values()) {
+                    for (lang in SpokenLanguage.entries) {
                         val isSelected = (selectedLanguage == lang)
                         Surface(
                             modifier = Modifier
@@ -1199,8 +1237,7 @@ fun CallScribeApp(viewModel: CallViewModel) {
     }
 
     // Caller Profile Detail Dialog
-    if (selectedCallerProfile != null) {
-        val profile = selectedCallerProfile!!
+    selectedCallerProfile?.let { profile ->
         CallerProfileDialog(
             profile = profile,
             onDismiss = { viewModel.closeCallerProfile() },
@@ -1225,8 +1262,7 @@ fun CallScribeApp(viewModel: CallViewModel) {
         )
     }
 
-    if (updateInfo != null) {
-        val info = updateInfo!!
+    updateInfo?.let { info ->
         AlertDialog(
             onDismissRequest = {
                 if (!isDownloadingUpdate) viewModel.dismissUpdateDialog()
@@ -2547,7 +2583,7 @@ fun CallerProfileDialog(
                             }
                         }
                     }
-                    IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
+                    IconButton(onClick = onDismiss) {
                         Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.Black)
                     }
                 }

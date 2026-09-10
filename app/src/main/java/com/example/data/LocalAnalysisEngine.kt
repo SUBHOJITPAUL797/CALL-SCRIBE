@@ -35,6 +35,14 @@ object LocalAnalysisEngine {
     private val monetaryPattern = Regex("""(?i)(?:[$€£₹]|rs\.?|usd|inr|dollars?|bucks?)\s*\d+(?:,\d+)*(?:\.\d+)?|\d+(?:,\d+)*(?:\.\d+)?\s*(?:[$€£₹]|rs\.?|usd|inr|dollars?|bucks?)""")
     private val phonePattern = Regex("""\b(?:\+?\d{1,3}[.\s]?)?\(?\d{3}\)?[.\s]?\d{3}[.\s]?\d{4}\b""")
 
+    private fun containsKeyword(text: String, keyword: String): Boolean {
+        return if (keyword.all { it in 'a'..'z' || it in 'A'..'Z' }) {
+            Regex("""\b${Regex.escape(keyword)}\b""", RegexOption.IGNORE_CASE).containsMatchIn(text)
+        } else {
+            text.contains(keyword, ignoreCase = true)
+        }
+    }
+
     /**
      * Returns a structured summary + transcript.
      * When transcript is empty (no Gemini key), returns an honest "needs API key" message
@@ -46,6 +54,7 @@ object LocalAnalysisEngine {
         // No transcript available (call audio has not been transcribed by an AI engine yet)
         if (cleanTranscript.isBlank() ||
             cleanTranscript.equals("No speech detected.", ignoreCase = true) ||
+            cleanTranscript.contains("Audio Transcription Required") ||
             cleanTranscript.contains("On-Device Speech Analysis") ||
             cleanTranscript.contains("Transcription requires")) {
 
@@ -79,7 +88,7 @@ object LocalAnalysisEngine {
 
         // Real transcript available — do extractive analysis
         val sentences = cleanTranscript
-            .split(Regex("""(?<=[.!?])\s+|\n+"""))
+            .split(Regex("""(?<=[.!?।॥])\s+|\n+"""))
             .map { it.trim() }
             .filter { it.isNotBlank() && it.length > 5 }
 
@@ -89,10 +98,10 @@ object LocalAnalysisEngine {
 
         for (sentence in sentences) {
             val lower = sentence.lowercase(Locale.ROOT)
-            if (actionKeywords.any { lower.contains(it) }) {
+            if (actionKeywords.any { containsKeyword(lower, it) }) {
                 if (!actionItems.contains(sentence)) actionItems.add(sentence)
             }
-            if (dateKeywords.any { lower.contains(it) }) {
+            if (dateKeywords.any { containsKeyword(lower, it) }) {
                 if (!datesFound.contains(sentence)) datesFound.add(sentence)
             }
             if (monetaryPattern.containsMatchIn(sentence) || phonePattern.containsMatchIn(sentence)) {
@@ -141,8 +150,8 @@ object LocalAnalysisEngine {
 
         // No real transcript — guide user to add API key
         val isEmptyTranscript = transcript.isBlank() ||
+            transcript.contains("Audio Transcription Required") ||
             transcript.contains("Transcription requires") ||
-            transcript.contains("API Key") ||
             transcript.contains("On-Device Speech Analysis")
 
         if (isEmptyTranscript) {
@@ -160,7 +169,7 @@ object LocalAnalysisEngine {
         }
 
         val sentences = transcript
-            .split(Regex("""(?<=[.!?])\s+|\n+"""))
+            .split(Regex("""(?<=[.!?।॥])\s+|\n+"""))
             .map { it.trim() }
             .filter { it.length > 5 }
 
@@ -212,7 +221,11 @@ object LocalAnalysisEngine {
         }
 
         // General keyword search
-        val stopWords = setOf("what", "where", "who", "whom", "how", "why", "the", "a", "an", "is", "was", "are", "were", "did", "do", "does", "in", "on", "at", "about", "for", "with", "this", "that")
+        val stopWords = setOf(
+            "what", "where", "who", "whom", "how", "why", "the", "a", "an", "is", "was", "are", "were",
+            "did", "do", "does", "in", "on", "at", "about", "for", "with", "this", "that",
+            "i", "me", "my", "you", "your", "he", "she", "it", "we", "they", "to", "of", "and", "or", "can", "tell"
+        )
         val tokens = q.split(Regex("""\W+""")).filter { it.length > 2 && !stopWords.contains(it) }
 
         if (tokens.isEmpty()) {

@@ -75,22 +75,24 @@ class CloudflareWorkerRepository(
                 .get()
                 .build()
 
-            val response = client.newCall(pingRequest).execute()
-            val code = response.code
-            val body = response.body?.string() ?: ""
+            client.newCall(pingRequest).execute().use { response ->
+                val code = response.code
+                val body = response.body?.string() ?: ""
 
-            if (code == 401 || code == 403) {
-                return@withContext Result.failure(Exception("Unauthorized (HTTP $code). Check your secret API token."))
+                if (code == 401 || code == 403) {
+                    return@withContext Result.failure(Exception("Unauthorized (HTTP $code). Check your secret API token."))
+                }
+
+                if (response.isSuccessful) {
+                    val json = try { JSONObject(body) } catch (_: Exception) { null }
+                    val msg = json?.optString("message") ?: "Cloudflare Worker is online and reachable!"
+                    return@withContext Result.success("✅ $msg (Whisper AI ready)")
+                }
+
+                return@withContext Result.failure(Exception("Worker returned HTTP $code: ${body.take(150)}"))
             }
-
-            if (response.isSuccessful) {
-                val json = try { JSONObject(body) } catch (_: Exception) { null }
-                val msg = json?.optString("message") ?: "Cloudflare Worker is online and reachable!"
-                return@withContext Result.success("✅ $msg (Whisper AI ready)")
-            }
-
-            return@withContext Result.failure(Exception("Worker returned HTTP $code: ${body.take(150)}"))
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(Exception("Failed to reach Worker: ${e.localizedMessage}", e))
         }
     }
@@ -122,50 +124,52 @@ class CloudflareWorkerRepository(
             return@withContext Result.failure(Exception("Cloudflare Worker URL is not configured."))
         }
 
-        val token = getToken()
-        val mediaType = (mimeType.ifBlank { "audio/mp3" }).toMediaTypeOrNull()
-        val requestBody = audioBytes.toRequestBody(mediaType)
-
-        val encodedTitle = urlEncode(fileName)
-        val langParam = if (language.isNotBlank() && language != "auto") "&lang=$language" else ""
-        val url = "$baseUrl/transcribe?title=$encodedTitle$langParam"
-
-        val request = Request.Builder()
-            .url(url)
-            .apply {
-                if (token.isNotBlank()) {
-                    addHeader("Authorization", "Bearer $token")
-                }
-                addHeader("X-Call-Title-Encoded", encodedTitle)
-                addHeader("X-Call-Title", sanitizeHeaderValue(fileName))
-                addHeader("X-Call-Language", language)
-            }
-            .post(requestBody)
-            .build()
-
         try {
-            val response = client.newCall(request).execute()
-            val code = response.code
-            val body = response.body?.string() ?: ""
+            val token = getToken()
+            val mediaType = (mimeType.ifBlank { "audio/mp3" }).toMediaTypeOrNull()
+            val requestBody = audioBytes.toRequestBody(mediaType)
 
-            if (code == 401 || code == 403) {
-                return@withContext Result.failure(Exception("Cloudflare Worker unauthorized. Verify API token."))
+            val encodedTitle = urlEncode(fileName)
+            val langParam = if (language.isNotBlank() && language != "auto") "&lang=${urlEncode(language)}" else ""
+            val url = "$baseUrl/transcribe?title=$encodedTitle$langParam"
+
+            val request = Request.Builder()
+                .url(url)
+                .apply {
+                    if (token.isNotBlank()) {
+                        addHeader("Authorization", "Bearer $token")
+                    }
+                    addHeader("X-Call-Title-Encoded", encodedTitle)
+                    addHeader("X-Call-Title", sanitizeHeaderValue(fileName))
+                    addHeader("X-Call-Language", sanitizeHeaderValue(language))
+                }
+                .post(requestBody)
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                val code = response.code
+                val body = response.body?.string() ?: ""
+
+                if (code == 401 || code == 403) {
+                    return@withContext Result.failure(Exception("Cloudflare Worker unauthorized. Verify API token."))
+                }
+
+                if (!response.isSuccessful) {
+                    val errMsg = try { JSONObject(body).optString("error", body) } catch (_: Exception) { body }
+                    return@withContext Result.failure(Exception("Cloudflare Worker error (HTTP $code): ${errMsg.take(200)}"))
+                }
+
+                val json = JSONObject(body)
+                val transcription = json.optString("transcription", json.optString("text", "")).trim()
+
+                if (transcription.isBlank()) {
+                    return@withContext Result.failure(Exception("No speech detected by Cloudflare Whisper."))
+                }
+
+                Result.success(transcription)
             }
-
-            if (!response.isSuccessful) {
-                val errMsg = try { JSONObject(body).optString("error", body) } catch (_: Exception) { body }
-                return@withContext Result.failure(Exception("Cloudflare Worker error (HTTP $code): ${errMsg.take(200)}"))
-            }
-
-            val json = JSONObject(body)
-            val transcription = json.optString("transcription", json.optString("text", "")).trim()
-
-            if (transcription.isBlank()) {
-                return@withContext Result.failure(Exception("No speech detected by Cloudflare Whisper."))
-            }
-
-            Result.success(transcription)
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(Exception("Cloudflare Whisper transcription failed: ${e.localizedMessage}", e))
         }
     }
@@ -182,42 +186,44 @@ class CloudflareWorkerRepository(
             return@withContext Result.failure(Exception("Cloudflare Worker URL is not configured."))
         }
 
-        val token = getToken()
-        val jsonPayload = JSONObject().apply {
-            put("transcript", transcript)
-            put("callTitle", callTitle)
-        }.toString()
-
-        val requestBody = jsonPayload.toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
-
-        val request = Request.Builder()
-            .url("$baseUrl/summarize")
-            .apply {
-                if (token.isNotBlank()) {
-                    addHeader("Authorization", "Bearer $token")
-                }
-            }
-            .post(requestBody)
-            .build()
-
         try {
-            val response = client.newCall(request).execute()
-            val code = response.code
-            val body = response.body?.string() ?: ""
+            val token = getToken()
+            val jsonPayload = JSONObject().apply {
+                put("transcript", transcript)
+                put("callTitle", callTitle)
+            }.toString()
 
-            if (!response.isSuccessful) {
-                val errMsg = try { JSONObject(body).optString("error", body) } catch (_: Exception) { body }
-                return@withContext Result.failure(Exception("Cloudflare Worker summary error (HTTP $code): ${errMsg.take(200)}"))
+            val requestBody = jsonPayload.toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
+
+            val request = Request.Builder()
+                .url("$baseUrl/summarize")
+                .apply {
+                    if (token.isNotBlank()) {
+                        addHeader("Authorization", "Bearer $token")
+                    }
+                }
+                .post(requestBody)
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                val code = response.code
+                val body = response.body?.string() ?: ""
+
+                if (!response.isSuccessful) {
+                    val errMsg = try { JSONObject(body).optString("error", body) } catch (_: Exception) { body }
+                    return@withContext Result.failure(Exception("Cloudflare Worker summary error (HTTP $code): ${errMsg.take(200)}"))
+                }
+
+                val json = JSONObject(body)
+                val summary = json.optString("summary", "").trim()
+                if (summary.isBlank()) {
+                    return@withContext Result.failure(Exception("Empty summary returned by Cloudflare Worker."))
+                }
+
+                Result.success(summary)
             }
-
-            val json = JSONObject(body)
-            val summary = json.optString("summary", "").trim()
-            if (summary.isBlank()) {
-                return@withContext Result.failure(Exception("Empty summary returned by Cloudflare Worker."))
-            }
-
-            Result.success(summary)
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(Exception("Cloudflare summarization failed: ${e.localizedMessage}", e))
         }
     }
@@ -236,51 +242,53 @@ class CloudflareWorkerRepository(
             return@withContext Result.failure(Exception("Cloudflare Worker URL is not configured."))
         }
 
-        val token = getToken()
-        val mediaType = (mimeType.ifBlank { "audio/mp3" }).toMediaTypeOrNull()
-        val requestBody = audioBytes.toRequestBody(mediaType)
-
-        val encodedTitle = urlEncode(fileName)
-        val langParam = if (language.isNotBlank() && language != "auto") "&lang=$language" else ""
-        val url = "$baseUrl/analyze?title=$encodedTitle$langParam"
-
-        val request = Request.Builder()
-            .url(url)
-            .apply {
-                if (token.isNotBlank()) {
-                    addHeader("Authorization", "Bearer $token")
-                }
-                addHeader("X-Call-Title-Encoded", encodedTitle)
-                addHeader("X-Call-Title", sanitizeHeaderValue(fileName))
-                addHeader("X-Call-Language", language)
-            }
-            .post(requestBody)
-            .build()
-
         try {
-            val response = client.newCall(request).execute()
-            val code = response.code
-            val body = response.body?.string() ?: ""
+            val token = getToken()
+            val mediaType = (mimeType.ifBlank { "audio/mp3" }).toMediaTypeOrNull()
+            val requestBody = audioBytes.toRequestBody(mediaType)
 
-            if (code == 401 || code == 403) {
-                return@withContext Result.failure(Exception("Cloudflare Worker unauthorized. Check your secret API token."))
-            }
+            val encodedTitle = urlEncode(fileName)
+            val langParam = if (language.isNotBlank() && language != "auto") "&lang=${urlEncode(language)}" else ""
+            val url = "$baseUrl/analyze?title=$encodedTitle$langParam"
 
-            if (response.isSuccessful) {
-                val json = JSONObject(body)
-                val transcription = json.optString("transcription", json.optString("text", "")).trim()
-                val summary = json.optString("summary", "").trim()
-                if (summary.isNotBlank()) {
-                    val finalTrans = if (transcription.isNotBlank()) transcription else "(No audible speech detected)"
-                    return@withContext Result.success(Pair(finalTrans, summary))
+            val request = Request.Builder()
+                .url(url)
+                .apply {
+                    if (token.isNotBlank()) {
+                        addHeader("Authorization", "Bearer $token")
+                    }
+                    addHeader("X-Call-Title-Encoded", encodedTitle)
+                    addHeader("X-Call-Title", sanitizeHeaderValue(fileName))
+                    addHeader("X-Call-Language", sanitizeHeaderValue(language))
                 }
+                .post(requestBody)
+                .build()
+
+            val (code, body) = client.newCall(request).execute().use { response ->
+                val code = response.code
+                val body = response.body?.string() ?: ""
+
+                if (code == 401 || code == 403) {
+                    return@withContext Result.failure(Exception("Cloudflare Worker unauthorized. Check your secret API token."))
+                }
+
+                if (response.isSuccessful) {
+                    val json = JSONObject(body)
+                    val transcription = json.optString("transcription", json.optString("text", "")).trim()
+                    val summary = json.optString("summary", "").trim()
+                    if (summary.isNotBlank()) {
+                        val finalTrans = if (transcription.isNotBlank()) transcription else "(No audible speech detected)"
+                        return@withContext Result.success(Pair(finalTrans, summary))
+                    }
+                }
+                Pair(code, body)
             }
 
             // Fallback to separate endpoints if /analyze endpoint returned 404 (e.g. older worker script)
             if (code == 404) {
-                val transResult = transcribeAudio(audioBytes, fileName, mimeType)
+                val transResult = transcribeAudio(audioBytes, fileName, mimeType, language)
                 if (transResult.isFailure) {
-                    return@withContext Result.failure(transResult.exceptionOrNull()!!)
+                    return@withContext Result.failure(transResult.exceptionOrNull() ?: Exception("Transcription failed"))
                 }
                 val trans = transResult.getOrThrow()
                 val sumResult = summarizeTranscript(trans, fileName)
@@ -291,6 +299,7 @@ class CloudflareWorkerRepository(
             val errMsg = try { JSONObject(body).optString("error", body) } catch (_: Exception) { body }
             Result.failure(Exception("Cloudflare analysis failed (HTTP $code): ${errMsg.take(200)}"))
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(Exception("Cloudflare analysis failed: ${e.localizedMessage}", e))
         }
     }
@@ -308,43 +317,45 @@ class CloudflareWorkerRepository(
             return@withContext Result.failure(Exception("Cloudflare Worker URL is not configured."))
         }
 
-        val token = getToken()
-        val jsonPayload = JSONObject().apply {
-            put("transcript", transcript)
-            put("summary", summary)
-            put("question", question)
-        }.toString()
-
-        val requestBody = jsonPayload.toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
-
-        val request = Request.Builder()
-            .url("$baseUrl/chat")
-            .apply {
-                if (token.isNotBlank()) {
-                    addHeader("Authorization", "Bearer $token")
-                }
-            }
-            .post(requestBody)
-            .build()
-
         try {
-            val response = client.newCall(request).execute()
-            val code = response.code
-            val body = response.body?.string() ?: ""
+            val token = getToken()
+            val jsonPayload = JSONObject().apply {
+                put("transcript", transcript)
+                put("summary", summary)
+                put("question", question)
+            }.toString()
 
-            if (!response.isSuccessful) {
-                val errMsg = try { JSONObject(body).optString("error", body) } catch (_: Exception) { body }
-                return@withContext Result.failure(Exception("Cloudflare chat error (HTTP $code): ${errMsg.take(200)}"))
+            val requestBody = jsonPayload.toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
+
+            val request = Request.Builder()
+                .url("$baseUrl/chat")
+                .apply {
+                    if (token.isNotBlank()) {
+                        addHeader("Authorization", "Bearer $token")
+                    }
+                }
+                .post(requestBody)
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                val code = response.code
+                val body = response.body?.string() ?: ""
+
+                if (!response.isSuccessful) {
+                    val errMsg = try { JSONObject(body).optString("error", body) } catch (_: Exception) { body }
+                    return@withContext Result.failure(Exception("Cloudflare chat error (HTTP $code): ${errMsg.take(200)}"))
+                }
+
+                val json = JSONObject(body)
+                val reply = json.optString("reply", "").trim()
+                if (reply.isBlank()) {
+                    return@withContext Result.failure(Exception("Empty reply from Cloudflare Worker."))
+                }
+
+                Result.success(reply)
             }
-
-            val json = JSONObject(body)
-            val reply = json.optString("reply", "").trim()
-            if (reply.isBlank()) {
-                return@withContext Result.failure(Exception("Empty reply from Cloudflare Worker."))
-            }
-
-            Result.success(reply)
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(Exception("Cloudflare chat failed: ${e.localizedMessage}", e))
         }
     }

@@ -3,6 +3,7 @@ package com.example.data
 import android.content.Context
 import android.content.SharedPreferences
 import com.example.BuildConfig
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 class ApiKeyManager(context: Context) {
     private val prefs: SharedPreferences = context.applicationContext.getSharedPreferences(
@@ -66,7 +67,11 @@ class ApiKeyManager(context: Context) {
 
     fun setCloudflareWorkerUrl(url: String) {
         val raw = url.trim().trimEnd('/')
-        val cleanUrl = if (raw.isNotBlank() && !raw.startsWith("http://") && !raw.startsWith("https://") && raw.contains(".") && !raw.contains(" ")) {
+        if (raw.isBlank()) {
+            clearCloudflareConfig()
+            return
+        }
+        val cleanUrl = if (!raw.startsWith("http://") && !raw.startsWith("https://") && raw.contains(".") && !raw.contains(" ")) {
             "https://$raw"
         } else {
             raw
@@ -84,11 +89,13 @@ class ApiKeyManager(context: Context) {
 
     fun isCloudflareConfigured(): Boolean {
         val url = getCloudflareWorkerUrl()
-        return url.isNotBlank() && (url.startsWith("http://") || url.startsWith("https://"))
+        if (url.isBlank()) return false
+        val httpUrl = try { url.toHttpUrlOrNull() } catch (_: Exception) { null }
+        return httpUrl != null && (httpUrl.scheme == "http" || httpUrl.scheme == "https") && httpUrl.host.isNotBlank()
     }
 
     fun clearCloudflareConfig() {
-        prefs.edit().putString(KEY_CLOUDFLARE_WORKER_URL, "").remove(KEY_CLOUDFLARE_WORKER_TOKEN).apply()
+        prefs.edit().remove(KEY_CLOUDFLARE_WORKER_URL).remove(KEY_CLOUDFLARE_WORKER_TOKEN).apply()
     }
 
     companion object {

@@ -75,9 +75,10 @@ class CallPreferencesManager(context: Context) {
     // ── Specific Contacts / Numbers to Auto-Analyze ───────────────────────────
 
     fun getAutoAnalyzeTargets(): Set<String> {
-        return prefs.getStringSet(KEY_AUTO_ANALYZE_TARGETS, emptySet()) ?: emptySet()
+        return prefs.getStringSet(KEY_AUTO_ANALYZE_TARGETS, emptySet())?.toSet() ?: emptySet()
     }
 
+    @Synchronized
     fun addAutoAnalyzeTarget(target: String) {
         val clean = target.trim()
         if (clean.isBlank()) return
@@ -86,9 +87,10 @@ class CallPreferencesManager(context: Context) {
         prefs.edit().putStringSet(KEY_AUTO_ANALYZE_TARGETS, current).apply()
     }
 
+    @Synchronized
     fun removeAutoAnalyzeTarget(target: String) {
         val current = getAutoAnalyzeTargets().toMutableSet()
-        current.remove(target.trim())
+        current.removeAll { it.equals(target.trim(), ignoreCase = true) }
         prefs.edit().putStringSet(KEY_AUTO_ANALYZE_TARGETS, current).apply()
     }
 
@@ -105,7 +107,7 @@ class CallPreferencesManager(context: Context) {
     // ── Checked / Completed Action Items Checklist ────────────────────────────
 
     fun getAllCompletedActionItems(): Set<String> {
-        return prefs.getStringSet(KEY_COMPLETED_ACTION_ITEMS, emptySet()) ?: emptySet()
+        return prefs.getStringSet(KEY_COMPLETED_ACTION_ITEMS, emptySet())?.toSet() ?: emptySet()
     }
 
     fun isActionItemCompleted(recordingId: Int, itemText: String): Boolean {
@@ -114,6 +116,7 @@ class CallPreferencesManager(context: Context) {
         return set.contains(key)
     }
 
+    @Synchronized
     fun setActionItemCompleted(recordingId: Int, itemText: String, completed: Boolean) {
         val key = "${recordingId}_${itemText.hashCode()}"
         val current = (prefs.getStringSet(KEY_COMPLETED_ACTION_ITEMS, emptySet()) ?: emptySet()).toMutableSet()

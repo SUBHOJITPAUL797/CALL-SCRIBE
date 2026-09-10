@@ -27,6 +27,22 @@ data class CallerProfile(
 
 object CallerProfileBuilder {
 
+    fun computeCallerKey(fileNameOrTitle: String): String {
+        val meta = CallMetadataParser.parse(fileNameOrTitle)
+        val extractedPhone = meta.contactOrNumber?.takeIf { it.any { c -> c.isDigit() } && !it.any { c -> c.isLetter() } }
+        val phoneDigits = extractedPhone?.filter { it.isDigit() } ?: ""
+        val cleanDigits = meta.cleanTitle.filter { it.isDigit() }
+
+        // Key: If extracted phone has >= 6 digits, normalize (last 10 digits if >= 10); otherwise cleaned name
+        return if (phoneDigits.length >= 6) {
+            if (phoneDigits.length >= 10) phoneDigits.takeLast(10) else phoneDigits
+        } else if (cleanDigits.length >= 6 && meta.cleanTitle.all { it.isDigit() || it == '+' || it == ' ' || it == '-' || it == '(' || it == ')' }) {
+            if (cleanDigits.length >= 10) cleanDigits.takeLast(10) else cleanDigits
+        } else {
+            meta.cleanTitle.trim().lowercase(Locale.ROOT)
+        }
+    }
+
     fun buildProfiles(
         recordings: List<Recording>,
         completedActionItemKeys: Set<String>,
@@ -42,23 +58,19 @@ object CallerProfileBuilder {
         for (rec in recordings) {
             val meta = CallMetadataParser.parse(rec.title)
             val extractedPhone = meta.contactOrNumber?.takeIf { it.any { c -> c.isDigit() } && !it.any { c -> c.isLetter() } }
-            val phoneDigits = extractedPhone?.filter { it.isDigit() } ?: ""
-            val cleanDigits = meta.cleanTitle.filter { it.isDigit() }
-
-            // Key: If extracted phone has >= 6 digits, normalize (last 10 digits if >= 10); otherwise cleaned name
-            val key = if (phoneDigits.length >= 6) {
-                if (phoneDigits.length >= 10) phoneDigits.takeLast(10) else phoneDigits
-            } else if (cleanDigits.length >= 6 && meta.cleanTitle.all { it.isDigit() || it == '+' || it == ' ' || it == '-' || it == '(' || it == ')' }) {
-                if (cleanDigits.length >= 10) cleanDigits.takeLast(10) else cleanDigits
-            } else {
-                meta.cleanTitle.trim().lowercase(Locale.ROOT)
-            }
+            val key = computeCallerKey(rec.title)
 
             if (key.isBlank()) continue
 
             grouped.getOrPut(key) { mutableListOf() }.add(rec)
-            if (!displayNames.containsKey(key) || (extractedPhone != null && displayNames[key]?.any { it.isLetter() } == false)) {
-                displayNames[key] = extractedPhone ?: meta.cleanTitle.trim()
+
+            val cleanName = meta.cleanTitle.trim()
+            val nameHasLetters = cleanName.any { it.isLetter() }
+            val candidateName = if (nameHasLetters) cleanName else (extractedPhone ?: cleanName)
+
+            // Prefer alphabetic contact names over raw numbers
+            if (!displayNames.containsKey(key) || (nameHasLetters && displayNames[key]?.any { it.isLetter() } != true)) {
+                displayNames[key] = candidateName
             }
             if (!phoneNumbers.containsKey(key) && extractedPhone != null) {
                 phoneNumbers[key] = extractedPhone
@@ -110,7 +122,8 @@ object CallerProfileBuilder {
                 val targetClean = target.trim()
                 if (targetClean.isBlank()) return@any false
                 val targetDigits = targetClean.filter { it.isDigit() }
-                if (targetDigits.length >= 6 && key.contains(targetDigits)) return@any true
+                val targetNormalized = if (targetDigits.length >= 10) targetDigits.takeLast(10) else targetDigits
+                if (targetNormalized.length >= 6 && (key == targetNormalized || key.contains(targetNormalized) || targetNormalized.contains(key))) return@any true
                 dispName.equals(targetClean, ignoreCase = true) ||
                     dispName.contains(targetClean, ignoreCase = true)
             }
