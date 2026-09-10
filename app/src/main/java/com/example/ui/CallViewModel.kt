@@ -29,15 +29,19 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.withLock
 import java.io.ByteArrayOutputStream
 
+import com.example.data.AudioDurationHelper
 import com.example.data.AutoAnalyzeMode
 import com.example.data.CallPreferencesManager
 import com.example.data.CallerProfile
@@ -98,6 +102,38 @@ class CallViewModel(
 
     // In-App Native Audio Player
     val audioPlayer = AudioPlayerManager(viewModelScope)
+    private val _recordingDurations = MutableStateFlow<Map<Int, Int>>(emptyMap())
+    val recordingDurations: StateFlow<Map<Int, Int>> = _recordingDurations.asStateFlow()
+
+    fun prefetchDurations(context: Context, recs: List<Recording>) {
+        val appContext = context.applicationContext
+        viewModelScope.launch(Dispatchers.IO) {
+            val newDurations = mutableMapOf<Int, Int>()
+            for (rec in recs) {
+                if (rec.durationMs > 0) {
+                    if (!_recordingDurations.value.containsKey(rec.id)) {
+                        newDurations[rec.id] = rec.durationMs
+                    }
+                    rec.sourceUri?.let { AudioDurationHelper.cacheDuration(it, rec.durationMs) }
+                } else if (!rec.sourceUri.isNullOrBlank()) {
+                    val cached = AudioDurationHelper.getCachedDuration(rec.sourceUri)
+                    val duration = if (cached > 0) {
+                        cached
+                    } else {
+                        val uri = try { Uri.parse(rec.sourceUri) } catch (_: Exception) { null }
+                        if (uri != null) AudioDurationHelper.getDurationMs(appContext, uri) else 0
+                    }
+                    if (duration > 0) {
+                        newDurations[rec.id] = duration
+                        repository.updateDuration(rec.id, duration)
+                    }
+                }
+            }
+            if (newDurations.isNotEmpty()) {
+                _recordingDurations.update { current -> current + newDurations }
+            }
+        }
+    }
 
     // Chat with Call State
     val activeChatRecording = MutableStateFlow<Recording?>(null)
@@ -732,13 +768,15 @@ class CallViewModel(
 
                         val existing = repository.getByUri(file.uri.toString())
                         if (existing == null) {
+                            val duration = AudioDurationHelper.getDurationMs(appContext, file.uri)
                             val placeholder = Recording(
                                 id = 0,
                                 title = file.name,
                                 contentEncrypted = SimpleEncryption.encrypt(""),
                                 summaryEncrypted = SimpleEncryption.encrypt("Pending AI Analysis\n\nTap ⚡ Transcribe & Analyze Call to view insights."),
                                 timestamp = if (file.lastModified > 0) file.lastModified else System.currentTimeMillis(),
-                                sourceUri = file.uri.toString()
+                                sourceUri = file.uri.toString(),
+                                durationMs = duration
                             )
                             val insertedId = repository.insert(placeholder).toInt()
                             newDetected++
@@ -1172,8 +1210,10 @@ class CallViewModel(
                 }
             }
 
-            val existingTimestamp = existingId?.let { withContext(Dispatchers.IO) { repository.getById(it)?.timestamp } }
+            val existingRec = existingId?.let { withContext(Dispatchers.IO) { repository.getById(it) } }
+            val existingTimestamp = existingRec?.timestamp
             val finalTimestamp = if (fileLastModified > 0) fileLastModified else (existingTimestamp ?: System.currentTimeMillis())
+            val duration = AudioDurationHelper.getDurationMs(context, uri).let { if (it > 0) it else (existingRec?.durationMs ?: 0) }
 
             val recording = Recording(
                 id = existingId ?: 0,
@@ -1181,7 +1221,8 @@ class CallViewModel(
                 contentEncrypted = SimpleEncryption.encrypt(transcription),
                 summaryEncrypted = SimpleEncryption.encrypt(summary),
                 timestamp = finalTimestamp,
-                sourceUri = uri.toString()
+                sourceUri = uri.toString(),
+                durationMs = duration
             )
             repository.insert(recording)
             Result.success(Unit)

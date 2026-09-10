@@ -205,6 +205,11 @@ fun CallScribeApp(viewModel: CallViewModel) {
     val isPlaying by viewModel.audioPlayer.isPlaying.collectAsStateWithLifecycle()
     val currentPositionMs by viewModel.audioPlayer.currentPositionMs.collectAsStateWithLifecycle()
     val durationMs by viewModel.audioPlayer.durationMs.collectAsStateWithLifecycle()
+    val recordingDurations by viewModel.recordingDurations.collectAsStateWithLifecycle()
+
+    LaunchedEffect(recordings) {
+        viewModel.prefetchDurations(context, recordings)
+    }
 
     // Chat with Call state
     val activeChatRecording by viewModel.activeChatRecording.collectAsStateWithLifecycle()
@@ -1258,7 +1263,8 @@ fun CallScribeApp(viewModel: CallViewModel) {
                 viewModel.syncToCalendar(context, rec)
             },
             playingRecordingId = playingRecordingId,
-            isPlaying = isPlaying
+            isPlaying = isPlaying,
+            durationMs = durationMs
         )
     }
 
@@ -1744,12 +1750,17 @@ fun CallScribeApp(viewModel: CallViewModel) {
                     contentPadding = PaddingValues(bottom = 88.dp)
                 ) {
                     items(recordings, key = { it.id }) { recording ->
+                        val durationForThisRec = if (playingRecordingId == recording.id && durationMs > 0) {
+                            durationMs
+                        } else {
+                            recordingDurations[recording.id]?.takeIf { it > 0 } ?: recording.durationMs
+                        }
                         RecordingCard(
                             recording = recording,
                             isCurrentlyPlaying = playingRecordingId == recording.id && isPlaying,
                             isAudioLoaded = playingRecordingId == recording.id,
                             currentPositionMs = if (playingRecordingId == recording.id) currentPositionMs else 0,
-                            durationMs = if (playingRecordingId == recording.id) durationMs else 0,
+                            durationMs = durationForThisRec,
                             onTogglePlay = { viewModel.toggleAudioPlay(context, recording) },
                             onSeek = { pos -> viewModel.seekAudio(pos) },
                             onChat = { viewModel.openChat(recording) },
@@ -1977,6 +1988,15 @@ fun RecordingCard(
                                 fontWeight = FontWeight.Bold,
                                 color = Color.DarkGray
                             )
+                            if (durationMs > 0) {
+                                Text("•", style = MaterialTheme.typography.labelSmall, color = Color.DarkGray)
+                                Text(
+                                    text = "⏱️ ${CallMetadataParser.formatDuration(durationMs)}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF0284C7)
+                                )
+                            }
                             when (metadata.direction) {
                                 com.example.data.CallDirection.INCOMING -> Text("↙ In", style = MaterialTheme.typography.labelSmall, color = Color(0xFF22C55E), fontWeight = FontWeight.Black)
                                 com.example.data.CallDirection.OUTGOING -> Text("↗ Out", style = MaterialTheme.typography.labelSmall, color = Color(0xFFF59E0B), fontWeight = FontWeight.Black)
@@ -2108,14 +2128,14 @@ fun RecordingCard(
                         }
                         Spacer(Modifier.width(8.dp))
                         Column(modifier = Modifier.weight(1f)) {
-                            if (isAudioLoaded && durationMs > 0) {
+                            if (durationMs > 0) {
                                 Slider(
-                                    value = currentPositionMs.toFloat(),
+                                    value = (if (isAudioLoaded) currentPositionMs else 0).toFloat(),
                                     onValueChange = { onSeek(it.toInt()) },
                                     valueRange = 0f..durationMs.toFloat(),
                                     modifier = Modifier.fillMaxWidth().height(20.dp),
                                     colors = SliderDefaults.colors(
-                                        thumbColor = Color.Black,
+                                        thumbColor = if (isAudioLoaded) Color.Black else Color.DarkGray,
                                         activeTrackColor = Color.Black,
                                         inactiveTrackColor = Color.LightGray
                                     )
@@ -2139,7 +2159,7 @@ fun RecordingCard(
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    CallMetadataParser.formatDuration(if (isAudioLoaded) durationMs else 0),
+                                    CallMetadataParser.formatDuration(durationMs),
                                     style = MaterialTheme.typography.labelSmall,
                                     color = Color.DarkGray,
                                     fontWeight = FontWeight.Bold
@@ -2538,7 +2558,8 @@ fun CallerProfileDialog(
     onChat: (Recording) -> Unit,
     onAddToCalendar: (Recording) -> Unit,
     playingRecordingId: Int?,
-    isPlaying: Boolean
+    isPlaying: Boolean,
+    durationMs: Int = 0
 ) {
     val dateFormat = remember { SimpleDateFormat("MMM dd, yyyy - HH:mm", Locale.getDefault()) }
     val initial = profile.displayName.firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()?.toString() ?: "👤"
@@ -2730,12 +2751,23 @@ fun CallerProfileDialog(
                                             horizontalArrangement = Arrangement.SpaceBetween,
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Text(
-                                                text = dateFormat.format(Date(rec.timestamp)),
-                                                style = MaterialTheme.typography.labelSmall,
-                                                fontWeight = FontWeight.Black,
-                                                color = Color.Black
-                                            )
+                                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                Text(
+                                                    text = dateFormat.format(Date(rec.timestamp)),
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    fontWeight = FontWeight.Black,
+                                                    color = Color.Black
+                                                )
+                                                val recDuration = if (rec.durationMs > 0) rec.durationMs else (if (playingRecordingId == rec.id) durationMs else 0)
+                                                if (recDuration > 0) {
+                                                    Text(
+                                                        text = "• ⏱️ ${CallMetadataParser.formatDuration(recDuration)}",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = Color(0xFF0284C7)
+                                                    )
+                                                }
+                                            }
                                             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                                 IconButton(onClick = { onPlayAudio(rec) }, modifier = Modifier.size(28.dp)) {
                                                     val isThisPlaying = playingRecordingId == rec.id && isPlaying

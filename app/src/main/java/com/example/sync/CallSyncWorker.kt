@@ -13,6 +13,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import com.example.data.AudioDurationHelper
 import com.example.data.CallMetadataParser
 import com.example.data.CallPreferencesManager
 import com.example.data.CommitmentExtractor
@@ -93,13 +94,15 @@ class CallSyncWorker(
                     val insertedId = if (existing != null) {
                         existing.id
                     } else {
+                        val duration = AudioDurationHelper.getDurationMs(appContext, fileInfo.uri)
                         val placeholder = Recording(
                             id = 0,
                             title = fileInfo.name,
                             contentEncrypted = SimpleEncryption.encrypt(""),
                             summaryEncrypted = SimpleEncryption.encrypt("Pending AI Analysis\n\nTap ⚡ Transcribe & Analyze Call to view insights."),
                             timestamp = if (fileInfo.lastModified > 0) fileInfo.lastModified else System.currentTimeMillis(),
-                            sourceUri = fileUriStr
+                            sourceUri = fileUriStr,
+                            durationMs = duration
                         )
                         repository.insert(placeholder).toInt()
                     }
@@ -127,6 +130,9 @@ class CallSyncWorker(
 
                         val finalTranscription = analysisResult.first
                         val finalSummary = analysisResult.second
+                        val duration = AudioDurationHelper.getDurationMs(appContext, fileInfo.uri).let {
+                            if (it > 0) it else (existing?.durationMs ?: 0)
+                        }
 
                         val updatedRecording = Recording(
                             id = insertedId,
@@ -134,7 +140,8 @@ class CallSyncWorker(
                             contentEncrypted = SimpleEncryption.encrypt(finalTranscription),
                             summaryEncrypted = SimpleEncryption.encrypt(finalSummary),
                             timestamp = if (fileInfo.lastModified > 0) fileInfo.lastModified else System.currentTimeMillis(),
-                            sourceUri = fileUriStr
+                            sourceUri = fileUriStr,
+                            durationMs = duration
                         )
                         repository.insert(updatedRecording)
 

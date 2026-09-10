@@ -64,7 +64,8 @@ data class Recording(
     val contentEncrypted: String, // Base64 simulated encryption of transcription
     val summaryEncrypted: String, // Base64 simulated encryption of summary
     val timestamp: Long = System.currentTimeMillis(),
-    val sourceUri: String? = null // To track synced files
+    val sourceUri: String? = null, // To track synced files
+    val durationMs: Int = 0
 ) {
     @delegate:Transient
     val decodedTranscription: String by lazy {
@@ -94,13 +95,24 @@ interface RecordingDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertRecording(recording: Recording): Long
 
+    @Query("UPDATE recordings SET durationMs = :durationMs WHERE id = :id")
+    suspend fun updateDuration(id: Int, durationMs: Int)
+
     @Query("DELETE FROM recordings WHERE id = :id")
     suspend fun deleteRecordingById(id: Int)
 }
 
-@Database(entities = [Recording::class], version = 2, exportSchema = false)
+@Database(entities = [Recording::class], version = 3, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun recordingDao(): RecordingDao
+
+    companion object {
+        val MIGRATION_2_3 = object : androidx.room.migration.Migration(2, 3) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE recordings ADD COLUMN durationMs INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+    }
 }
 
 class RecordingRepository(private val dao: RecordingDao) {
@@ -114,6 +126,8 @@ class RecordingRepository(private val dao: RecordingDao) {
     suspend fun getById(id: Int): Recording? = dao.getRecordingById(id)
 
     suspend fun insert(recording: Recording): Long = dao.insertRecording(recording)
+
+    suspend fun updateDuration(id: Int, durationMs: Int) = dao.updateDuration(id, durationMs)
 
     suspend fun deleteById(id: Int) = dao.deleteRecordingById(id)
 }

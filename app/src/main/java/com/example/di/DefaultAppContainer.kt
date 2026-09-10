@@ -63,6 +63,7 @@ object DefaultAppContainer {
                     AppDatabase::class.java,
                     "call_scribe_database"
                 )
+                .addMigrations(AppDatabase.MIGRATION_2_3)
                 .fallbackToDestructiveMigration(true)
                 .build()
                 database = newDb
