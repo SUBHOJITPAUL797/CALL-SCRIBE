@@ -91,7 +91,7 @@ class CloudflareWorkerRepository(
 
                 return@withContext Result.failure(Exception("Worker returned HTTP $code: ${body.take(150)}"))
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(Exception("Failed to reach Worker: ${e.localizedMessage}", e))
         }
@@ -168,7 +168,7 @@ class CloudflareWorkerRepository(
 
                 Result.success(transcription)
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(Exception("Cloudflare Whisper transcription failed: ${e.localizedMessage}", e))
         }
@@ -222,7 +222,7 @@ class CloudflareWorkerRepository(
 
                 Result.success(summary)
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(Exception("Cloudflare summarization failed: ${e.localizedMessage}", e))
         }
@@ -298,7 +298,7 @@ class CloudflareWorkerRepository(
 
             val errMsg = try { JSONObject(body).optString("error", body) } catch (_: Exception) { body }
             Result.failure(Exception("Cloudflare analysis failed (HTTP $code): ${errMsg.take(200)}"))
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(Exception("Cloudflare analysis failed: ${e.localizedMessage}", e))
         }
@@ -319,16 +319,31 @@ class CloudflareWorkerRepository(
 
         try {
             val token = getToken()
-            val jsonPayload = JSONObject().apply {
-                put("transcript", transcript)
-                put("summary", summary)
-                put("question", question)
-            }.toString()
+            val prompt = """
+You are an expert AI assistant answering questions about a specific phone call recording.
+Use ONLY the call transcript and summary below to answer the user's question accurately.
 
-            val requestBody = jsonPayload.toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
+CALL TRANSCRIPT:
+$transcript
+
+CALL SUMMARY:
+$summary
+
+USER QUESTION:
+$question
+
+Provide a direct, helpful, and concise answer based strictly on the conversation.
+            """.trimIndent()
+
+            val bodyJson = JSONObject().apply {
+                put("prompt", prompt)
+            }
+
+            val requestBody = bodyJson.toString().toRequestBody("application/json".toMediaTypeOrNull())
+            val url = "$baseUrl/chat"
 
             val request = Request.Builder()
-                .url("$baseUrl/chat")
+                .url(url)
                 .apply {
                     if (token.isNotBlank()) {
                         addHeader("Authorization", "Bearer $token")
@@ -343,7 +358,7 @@ class CloudflareWorkerRepository(
 
                 if (!response.isSuccessful) {
                     val errMsg = try { JSONObject(body).optString("error", body) } catch (_: Exception) { body }
-                    return@withContext Result.failure(Exception("Cloudflare chat error (HTTP $code): ${errMsg.take(200)}"))
+                    return@withContext Result.failure(Exception("Chat failed (HTTP $code): ${errMsg.take(200)}"))
                 }
 
                 val json = JSONObject(body)
@@ -354,7 +369,7 @@ class CloudflareWorkerRepository(
 
                 Result.success(reply)
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(Exception("Cloudflare chat failed: ${e.localizedMessage}", e))
         }

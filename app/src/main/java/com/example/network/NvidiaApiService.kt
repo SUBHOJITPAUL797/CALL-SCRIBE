@@ -83,7 +83,7 @@ class NvidiaRepository(
                 }
                 Result.failure(Exception("NVIDIA cloud transcription unavailable (HTTP ${response.code})."))
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(Exception("NVIDIA transcription: ${e.localizedMessage}", e))
         }
@@ -230,7 +230,7 @@ You are an expert call recording analyst. Create a thorough, structured summary 
                     }
                 }
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             return@withContext Result.failure(Exception("Connection error: ${e.localizedMessage}", e))
         }
@@ -263,7 +263,7 @@ You are an expert call recording analyst. Create a thorough, structured summary 
                         response.code == 401 -> return@withContext Result.failure(Exception("Invalid NVIDIA key (HTTP 401). Verify at build.nvidia.com."))
                     }
                 }
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
             }
         }
@@ -285,12 +285,8 @@ You are an expert call recording analyst. Create a thorough, structured summary 
                 val responseBody = response.body?.string()
 
                 if (!response.isSuccessful) {
-                    return when (response.code) {
-                        401 -> Result.failure(Exception("Invalid NVIDIA API key (HTTP 401)."))
-                        403 -> Result.failure(Exception("NVIDIA API permission error (HTTP 403)."))
-                        429 -> Result.failure(Exception("NVIDIA rate limit exceeded. Try again in a moment."))
-                        else -> Result.failure(Exception("NVIDIA API error: ${response.code} — $responseBody"))
-                    }
+                    val code = response.code
+                    return Result.failure(Exception("NVIDIA API error: HTTP $code - $responseBody"))
                 }
 
                 val json = JSONObject(responseBody ?: "{}")
@@ -307,7 +303,7 @@ You are an expert call recording analyst. Create a thorough, structured summary 
                     Result.success(content)
                 }
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(Exception("NVIDIA request failed: ${e.localizedMessage}", e))
         }

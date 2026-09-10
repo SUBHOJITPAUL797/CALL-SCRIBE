@@ -1059,6 +1059,18 @@ class CallViewModel(
         }
     }
 
+    private fun hasSufficientHeap(requiredBytes: Long): Boolean {
+        val rt = Runtime.getRuntime()
+        val freeMemory = rt.maxMemory() - (rt.totalMemory() - rt.freeMemory())
+        val needed = (requiredBytes * 2L) + (32L * 1024 * 1024)
+        if (freeMemory < needed) {
+            System.gc()
+            val afterGc = rt.maxMemory() - (rt.totalMemory() - rt.freeMemory())
+            return afterGc >= needed
+        }
+        return true
+    }
+
     private val MAX_FILE_SIZE_GEMINI = 15L * 1024 * 1024  // 15 MB — Gemini inline limit
     private val MAX_FILE_SIZE_NVIDIA = 25L * 1024 * 1024  // 25 MB — NVIDIA ASR limit
     private val MAX_FILE_SIZE_CLOUDFLARE = 24L * 1024 * 1024  // 24 MB — Safe under Cloudflare 25 MB payload limit
@@ -1069,20 +1081,50 @@ class CallViewModel(
         maxBytes: Long
     ): ByteArray? = withContext(Dispatchers.IO) {
         try {
-            context.contentResolver.openInputStream(uri)?.use { stream ->
-                val buffer = ByteArrayOutputStream()
-                val chunk = ByteArray(16384)
-                var total = 0L
-                var read: Int
-                while (stream.read(chunk, 0, chunk.size).also { read = it } != -1) {
-                    total += read
-                    if (total > maxBytes) {
-                        android.util.Log.w("CallScribe", "Audio file exceeded size limit of $maxBytes bytes: $uri")
-                        return@use null
+            val statSize = try {
+                context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: -1L
+            } catch (_: Throwable) { -1L }
+
+            if (statSize > maxBytes) {
+                android.util.Log.w("CallScribe", "Audio file exceeded size limit of $maxBytes bytes: $uri (actual: $statSize)")
+                return@withContext null
+            }
+
+            val estimatedBytes = if (statSize > 0) statSize else minOf(maxBytes, 10L * 1024 * 1024)
+            if (!hasSufficientHeap(estimatedBytes)) {
+                android.util.Log.w("CallScribe", "Heap constrained for $estimatedBytes bytes, requesting GC before audio read.")
+                System.gc()
+            }
+
+            if (statSize in 1..maxBytes) {
+                val targetSize = statSize.toInt()
+                val bytes = ByteArray(targetSize)
+                var totalRead = 0
+                context.contentResolver.openInputStream(uri)?.use { stream ->
+                    while (totalRead < targetSize) {
+                        val count = stream.read(bytes, totalRead, targetSize - totalRead)
+                        if (count <= 0) break
+                        totalRead += count
                     }
-                    buffer.write(chunk, 0, read)
                 }
-                buffer.toByteArray()
+                if (totalRead == targetSize) bytes else bytes.copyOf(totalRead)
+            } else {
+                val initialCap = minOf(maxBytes.toInt(), 1024 * 1024)
+                context.contentResolver.openInputStream(uri)?.use { stream ->
+                    val buffer = ByteArrayOutputStream(initialCap)
+                    val chunk = ByteArray(32768)
+                    var total = 0L
+                    var read: Int
+                    while (stream.read(chunk, 0, chunk.size).also { read = it } != -1) {
+                        total += read
+                        if (total > maxBytes) {
+                            android.util.Log.w("CallScribe", "Audio file exceeded size limit of $maxBytes bytes: $uri")
+                            return@use null
+                        }
+                        buffer.write(chunk, 0, read)
+                    }
+                    buffer.toByteArray()
+                }
             }
         } catch (_: OutOfMemoryError) {
             android.util.Log.e("CallScribe", "OutOfMemoryError reading audio: $uri. Invoking GC.")
@@ -1142,7 +1184,6 @@ class CallViewModel(
                 val tryCloudflareFirst = (currentEngine == PreferredEngine.CLOUDFLARE || currentEngine == PreferredEngine.AUTO) && isCloudflareConfigured()
                 if (tryCloudflareFirst && fileSize <= MAX_FILE_SIZE_CLOUDFLARE) {
                     val bytes = readAudioBytes(context, uri, MAX_FILE_SIZE_CLOUDFLARE)
-                    audioBytes = bytes
                     if (bytes != null) {
                         val cfResult = cloudflareRepository?.analyzeAudio(bytes, fileName, resolvedMime, spokenLanguage.value.code)
                         if (cfResult?.isSuccess == true) {
@@ -1152,6 +1193,11 @@ class CallViewModel(
                         } else {
                             lastEngineError = cfResult?.exceptionOrNull()
                         }
+                        if (transcription.isNotBlank()) {
+                            audioBytes = null
+                        } else if (fileSize <= MAX_FILE_SIZE_GEMINI) {
+                            audioBytes = bytes
+                        }
                     }
                 }
 
@@ -1160,33 +1206,41 @@ class CallViewModel(
                 val tryGemini = (currentEngine == PreferredEngine.GEMINI || (currentEngine == PreferredEngine.AUTO && cloudflareGaveNoSpeech) || transcription.isBlank()) && isApiKeyConfigured()
                 if (tryGemini && fileSize <= MAX_FILE_SIZE_GEMINI) {
                     val bytes = audioBytes ?: readAudioBytes(context, uri, MAX_FILE_SIZE_GEMINI)
-                    audioBytes = bytes
+                    audioBytes = null // Release raw byte buffer reference before Base64 encoding & network call
                     if (bytes != null) {
-                        val base64Audio = Base64.encodeToString(bytes, Base64.NO_WRAP)
-                        var geminiResult = geminiRepository.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
-
-                        // If rate limit (429) hit, wait 3 seconds and retry once
-                        if (geminiResult.exceptionOrNull() is ApiQuotaExceededException) {
-                            kotlinx.coroutines.delay(3000)
-                            geminiResult = geminiRepository.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
+                        val base64Audio = try {
+                            Base64.encodeToString(bytes, Base64.NO_WRAP)
+                        } catch (_: OutOfMemoryError) {
+                            System.gc()
+                            android.util.Log.e("CallScribe", "OOM encoding Base64 for Gemini: $fileName")
+                            null
                         }
 
-                        if (geminiResult.isSuccess) {
-                            val pair = geminiResult.getOrThrow()
-                            if (!isUnusableTranscription(pair.first, pair.second) || transcription.isBlank() || transcription.contains("No audible speech detected", ignoreCase = true)) {
-                                transcription = pair.first
-                                summary = pair.second
+                        if (base64Audio != null) {
+                            var geminiResult = geminiRepository.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
+
+                            // If rate limit (429) hit, wait 3 seconds and retry once
+                            if (geminiResult.exceptionOrNull() is ApiQuotaExceededException) {
+                                kotlinx.coroutines.delay(3000)
+                                geminiResult = geminiRepository.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
                             }
-                        } else {
-                            lastEngineError = geminiResult.exceptionOrNull()
+
+                            if (geminiResult.isSuccess) {
+                                val pair = geminiResult.getOrThrow()
+                                if (!isUnusableTranscription(pair.first, pair.second) || transcription.isBlank() || transcription.contains("No audible speech detected", ignoreCase = true)) {
+                                    transcription = pair.first
+                                    summary = pair.second
+                                }
+                            } else {
+                                lastEngineError = geminiResult.exceptionOrNull()
+                            }
                         }
                     }
                 }
 
                 // ── Mode 3: Try Cloudflare as fallback (if Gemini was preferred and failed, and Cloudflare wasn't tried yet) ─
                 if (transcription.isBlank() && !tryCloudflareFirst && isCloudflareConfigured() && fileSize <= MAX_FILE_SIZE_CLOUDFLARE) {
-                    val bytes = audioBytes ?: readAudioBytes(context, uri, MAX_FILE_SIZE_CLOUDFLARE)
-                    audioBytes = bytes
+                    val bytes = readAudioBytes(context, uri, MAX_FILE_SIZE_CLOUDFLARE)
                     if (bytes != null) {
                         val cfResult = cloudflareRepository?.analyzeAudio(bytes, fileName, resolvedMime, spokenLanguage.value.code)
                         if (cfResult?.isSuccess == true) {
@@ -1201,8 +1255,7 @@ class CallViewModel(
 
                 // ── Mode 4: Try NVIDIA Canary ASR if transcription still blank ─────────
                 if (transcription.isBlank() && isNvidiaKeyConfigured() && fileSize <= MAX_FILE_SIZE_NVIDIA) {
-                    val bytes = audioBytes ?: readAudioBytes(context, uri, MAX_FILE_SIZE_NVIDIA)
-                    audioBytes = bytes
+                    val bytes = readAudioBytes(context, uri, MAX_FILE_SIZE_NVIDIA)
                     if (bytes != null) {
                         val asrRes = nvidiaRepository?.transcribeAudio(bytes, fileName, resolvedMime)
                         if (asrRes?.isSuccess == true) {
@@ -1243,6 +1296,8 @@ class CallViewModel(
                 }
             }
 
+            audioBytes = null // Guarantee memory release
+
             val existingRec = existingId?.let { withContext(Dispatchers.IO) { repository.getById(it) } }
             val existingTimestamp = existingRec?.timestamp
             val finalTimestamp = if (fileLastModified > 0) fileLastModified else (existingTimestamp ?: System.currentTimeMillis())
@@ -1259,6 +1314,10 @@ class CallViewModel(
             )
             repository.insert(recording)
             Result.success(Unit)
+        } catch (oom: OutOfMemoryError) {
+            android.util.Log.e("CallScribe", "OutOfMemoryError in processAudioFile: ${oom.localizedMessage}. Invoking GC.", oom)
+            System.gc()
+            Result.failure(Exception("Recording is too large for current available device memory. Please close background apps or use On-Device mode."))
         } catch (t: Throwable) {
             if (t is kotlinx.coroutines.CancellationException) throw t
             Result.failure(t)

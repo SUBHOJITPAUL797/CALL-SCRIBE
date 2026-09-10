@@ -338,15 +338,22 @@ class CallSyncWorker(
         val tryGemini = (preferredEngine == PreferredEngine.GEMINI || (preferredEngine == PreferredEngine.AUTO && cloudflareGaveNoSpeech) || transcription.isBlank()) && geminiRepo.isApiKeyConfigured()
         if (tryGemini && fileSize <= maxFileSizeGemini) {
             val bytes = audioBytes ?: readAudioBytes(context, uri, maxFileSizeGemini)
-            audioBytes = bytes
+            audioBytes = null // Release raw byte reference before Base64 encoding
             if (bytes != null) {
-                val base64Audio = Base64.encodeToString(bytes, Base64.NO_WRAP)
-                val geminiRes = geminiRepo.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
-                if (geminiRes.isSuccess) {
-                    val pair = geminiRes.getOrThrow()
-                    if (!isUnusableTranscription(pair.first, pair.second) || transcription.isBlank() || transcription.contains("No audible speech detected", ignoreCase = true)) {
-                        transcription = pair.first
-                        summary = pair.second
+                val base64Audio = try {
+                    Base64.encodeToString(bytes, Base64.NO_WRAP)
+                } catch (_: OutOfMemoryError) {
+                    System.gc()
+                    null
+                }
+                if (base64Audio != null) {
+                    val geminiRes = geminiRepo.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
+                    if (geminiRes.isSuccess) {
+                        val pair = geminiRes.getOrThrow()
+                        if (!isUnusableTranscription(pair.first, pair.second) || transcription.isBlank() || transcription.contains("No audible speech detected", ignoreCase = true)) {
+                            transcription = pair.first
+                            summary = pair.second
+                        }
                     }
                 }
             }
@@ -354,8 +361,7 @@ class CallSyncWorker(
 
         // 3. Fallback to Cloudflare if Gemini was preferred but failed, and Cloudflare wasn't tried yet
         if (transcription.isBlank() && !tryCloudflareFirst && cloudflareRepo.isConfigured() && fileSize <= maxFileSizeCloudflare) {
-            val bytes = audioBytes ?: readAudioBytes(context, uri, maxFileSizeCloudflare)
-            audioBytes = bytes
+            val bytes = readAudioBytes(context, uri, maxFileSizeCloudflare)
             if (bytes != null) {
                 val cfRes = cloudflareRepo.analyzeAudio(bytes, fileName, resolvedMime, spokenLanguage)
                 if (cfRes.isSuccess) {
@@ -368,7 +374,7 @@ class CallSyncWorker(
 
         // 4. Try NVIDIA Canary ASR if transcription still blank
         if (transcription.isBlank() && nvidiaRepo.isApiKeyConfigured() && fileSize <= maxFileSizeNvidia) {
-            val bytes = audioBytes ?: readAudioBytes(context, uri, maxFileSizeNvidia)
+            val bytes = readAudioBytes(context, uri, maxFileSizeNvidia)
             if (bytes != null) {
                 val asrRes = nvidiaRepo.transcribeAudio(bytes, fileName, resolvedMime)
                 if (asrRes.isSuccess) {
@@ -403,7 +409,21 @@ class CallSyncWorker(
             summary = locSum
         }
 
+        audioBytes = null
+
         return Pair(transcription, summary)
+    }
+
+    private fun hasSufficientHeap(requiredBytes: Long): Boolean {
+        val rt = Runtime.getRuntime()
+        val freeMemory = rt.maxMemory() - (rt.totalMemory() - rt.freeMemory())
+        val needed = (requiredBytes * 2L) + (32L * 1024 * 1024)
+        if (freeMemory < needed) {
+            System.gc()
+            val afterGc = rt.maxMemory() - (rt.totalMemory() - rt.freeMemory())
+            return afterGc >= needed
+        }
+        return true
     }
 
     private suspend fun readAudioBytes(
@@ -412,22 +432,50 @@ class CallSyncWorker(
         maxBytes: Long
     ): ByteArray? = withContext(Dispatchers.IO) {
         try {
-            context.contentResolver.openInputStream(uri)?.use { stream ->
-                val buffer = ByteArrayOutputStream()
-                val chunk = ByteArray(16384)
-                var total = 0L
-                var read: Int
-                while (stream.read(chunk, 0, chunk.size).also { read = it } != -1) {
-                    total += read
-                    if (total > maxBytes) return@use null
-                    buffer.write(chunk, 0, read)
+            val statSize = try {
+                context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: -1L
+            } catch (_: Throwable) { -1L }
+
+            if (statSize > maxBytes) {
+                return@withContext null
+            }
+
+            val estimatedBytes = if (statSize > 0) statSize else minOf(maxBytes, 10L * 1024 * 1024)
+            if (!hasSufficientHeap(estimatedBytes)) {
+                System.gc()
+            }
+
+            if (statSize in 1..maxBytes) {
+                val targetSize = statSize.toInt()
+                val bytes = ByteArray(targetSize)
+                var totalRead = 0
+                context.contentResolver.openInputStream(uri)?.use { stream ->
+                    while (totalRead < targetSize) {
+                        val count = stream.read(bytes, totalRead, targetSize - totalRead)
+                        if (count <= 0) break
+                        totalRead += count
+                    }
                 }
-                buffer.toByteArray()
+                if (totalRead == targetSize) bytes else bytes.copyOf(totalRead)
+            } else {
+                val initialCap = minOf(maxBytes.toInt(), 1024 * 1024)
+                context.contentResolver.openInputStream(uri)?.use { stream ->
+                    val buffer = ByteArrayOutputStream(initialCap)
+                    val chunk = ByteArray(32768)
+                    var total = 0L
+                    var read: Int
+                    while (stream.read(chunk, 0, chunk.size).also { read = it } != -1) {
+                        total += read
+                        if (total > maxBytes) return@use null
+                        buffer.write(chunk, 0, read)
+                    }
+                    buffer.toByteArray()
+                }
             }
         } catch (_: OutOfMemoryError) {
             System.gc()
             null
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             null
         }
     }
