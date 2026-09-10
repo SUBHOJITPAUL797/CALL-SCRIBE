@@ -752,10 +752,13 @@ fun CallScribeApp(viewModel: CallViewModel) {
             confirmButton = {
                 Button(
                     onClick = {
-                        viewModel.setPreferredEngine(selectedEngine)
-                        viewModel.saveCloudflareConfig(enteredCloudflareUrl, enteredCloudflareToken)
-                        viewModel.saveNvidiaApiKey(enteredNvidiaKey)
-                        viewModel.saveApiKey(enteredApiKey)
+                        viewModel.saveAllEngineSettings(
+                            engine = selectedEngine,
+                            cloudflareUrl = enteredCloudflareUrl,
+                            cloudflareToken = enteredCloudflareToken,
+                            nvidiaKey = enteredNvidiaKey,
+                            geminiKey = enteredApiKey
+                        )
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                     shape = RoundedCornerShape(8.dp),

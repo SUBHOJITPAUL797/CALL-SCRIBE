@@ -56,7 +56,7 @@ class NvidiaRepository(
         }
 
         // Try NVIDIA ASR endpoint
-        val safeFileName = fileName.ifBlank { "recording.mp3" }
+        val safeFileName = fileName.filter { it.code in 32..126 }.ifBlank { "recording.mp3" }
         val mediaType = mimeType.toMediaTypeOrNull() ?: "audio/mp3".toMediaTypeOrNull()
         val fileBody = audioBytes.toRequestBody(mediaType)
 
@@ -68,7 +68,7 @@ class NvidiaRepository(
 
         val request = Request.Builder()
             .url("$BASE_URL/audio/transcriptions")
-            .addHeader("Authorization", "Bearer $apiKey")
+            .addHeader("Authorization", "Bearer ${apiKey.trim()}")
             .post(requestBody)
             .build()
 
@@ -259,8 +259,7 @@ You are an expert call recording analyst. Create a thorough, structured summary 
             val requestBody = body.toString().toRequestBody("application/json".toMediaTypeOrNull())
             val request = Request.Builder()
                 .url("$BASE_URL/chat/completions")
-                .addHeader("Authorization", "Bearer $apiKey")
-                .addHeader("Content-Type", "application/json")
+                .addHeader("Authorization", "Bearer ${apiKey.trim()}")
                 .post(requestBody)
                 .build()
 

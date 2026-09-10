@@ -224,13 +224,24 @@ class CallSyncWorker(
                     val docId = if (idIdx != -1) cursor.getString(idIdx) else null ?: continue
                     val name = if (nameIdx != -1) cursor.getString(nameIdx) else null ?: "recording"
                     val mime = if (mimeIdx != -1) cursor.getString(mimeIdx) else null
-                    val size = if (sizeIdx != -1 && !cursor.isNull(sizeIdx)) cursor.getLong(sizeIdx) else 0L
+                    var size = if (sizeIdx != -1 && !cursor.isNull(sizeIdx)) cursor.getLong(sizeIdx) else 0L
                     val lastModified = if (modIdx != -1 && !cursor.isNull(modIdx)) cursor.getLong(modIdx) else 0L
 
                     if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
                         subDirs.add(docId)
                     } else if (isAudioFile(name, mime)) {
                         val fileUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+                        if (size <= 0L) {
+                            size = try {
+                                context.contentResolver.openFileDescriptor(fileUri, "r")?.use { it.statSize } ?: 0L
+                            } catch (_: Exception) { 0L }
+                            if (size <= 0L) {
+                                val hasContent = try {
+                                    context.contentResolver.openInputStream(fileUri)?.use { it.read() != -1 } ?: false
+                                } catch (_: Exception) { false }
+                                if (hasContent) size = 1L
+                            }
+                        }
                         results.add(AudioFileInfo(fileUri, name, mime, size, lastModified))
                     }
                 }
@@ -358,17 +369,21 @@ class CallSyncWorker(
         uri: Uri,
         maxBytes: Long
     ): ByteArray? = withContext(Dispatchers.IO) {
-        context.contentResolver.openInputStream(uri)?.use { stream ->
-            val buffer = ByteArrayOutputStream()
-            val chunk = ByteArray(16384)
-            var total = 0L
-            var read: Int
-            while (stream.read(chunk, 0, chunk.size).also { read = it } != -1) {
-                total += read
-                if (total > maxBytes) return@use null
-                buffer.write(chunk, 0, read)
+        try {
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                val buffer = ByteArrayOutputStream()
+                val chunk = ByteArray(16384)
+                var total = 0L
+                var read: Int
+                while (stream.read(chunk, 0, chunk.size).also { read = it } != -1) {
+                    total += read
+                    if (total > maxBytes) return@use null
+                    buffer.write(chunk, 0, read)
+                }
+                buffer.toByteArray()
             }
-            buffer.toByteArray()
+        } catch (_: Exception) {
+            null
         }
     }
 

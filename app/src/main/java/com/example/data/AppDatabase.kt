@@ -17,13 +17,21 @@ import androidx.room.Index
 
 object SimpleEncryption {
     fun encrypt(str: String): String {
-        return java.util.Base64.getEncoder().encodeToString(str.toByteArray(Charsets.UTF_8))
+        return try {
+            android.util.Base64.encodeToString(str.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+        } catch (_: Throwable) {
+            java.util.Base64.getEncoder().encodeToString(str.toByteArray(Charsets.UTF_8))
+        }
     }
 
     fun decrypt(base64Str: String): String {
         if (base64Str.isBlank()) return ""
         return try {
-            String(java.util.Base64.getDecoder().decode(base64Str.trim()), Charsets.UTF_8)
+            try {
+                String(android.util.Base64.decode(base64Str.trim(), android.util.Base64.DEFAULT), Charsets.UTF_8)
+            } catch (_: Throwable) {
+                String(java.util.Base64.getDecoder().decode(base64Str.trim()), Charsets.UTF_8)
+            }
         } catch (e: Exception) {
             base64Str
         }

@@ -65,7 +65,12 @@ class ApiKeyManager(context: Context) {
     }
 
     fun setCloudflareWorkerUrl(url: String) {
-        val cleanUrl = url.trim().trimEnd('/')
+        val raw = url.trim().trimEnd('/')
+        val cleanUrl = if (raw.isNotBlank() && !raw.startsWith("http://") && !raw.startsWith("https://") && raw.contains(".") && !raw.contains(" ")) {
+            "https://$raw"
+        } else {
+            raw
+        }
         prefs.edit().putString(KEY_CLOUDFLARE_WORKER_URL, cleanUrl).apply()
     }
 

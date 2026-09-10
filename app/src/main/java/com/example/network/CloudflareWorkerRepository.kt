@@ -27,7 +27,15 @@ class CloudflareWorkerRepository(
     }
 
     private fun getCleanUrl(): String {
-        return urlProvider().trim().trimEnd('/')
+        val raw = urlProvider().trim().trimEnd('/')
+        if (raw.isBlank()) return ""
+        return if (raw.startsWith("http://") || raw.startsWith("https://")) {
+            raw
+        } else if (raw.contains(".") && !raw.contains(" ") && !raw.contains("\n")) {
+            "https://$raw"
+        } else {
+            raw
+        }
     }
 
     private fun getToken(): String {
@@ -41,7 +49,14 @@ class CloudflareWorkerRepository(
         testUrl: String? = null,
         testToken: String? = null
     ): Result<String> = withContext(Dispatchers.IO) {
-        val baseUrl = (testUrl ?: getCleanUrl()).trim().trimEnd('/')
+        val rawUrl = (testUrl ?: urlProvider()).trim().trimEnd('/')
+        val baseUrl = if (rawUrl.startsWith("http://") || rawUrl.startsWith("https://")) {
+            rawUrl
+        } else if (rawUrl.contains(".") && !rawUrl.contains(" ") && !rawUrl.contains("\n")) {
+            "https://$rawUrl"
+        } else {
+            rawUrl
+        }
         val token = (testToken ?: getToken()).trim()
 
         if (baseUrl.isBlank() || (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://"))) {
