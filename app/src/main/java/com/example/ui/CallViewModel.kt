@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -126,7 +127,6 @@ class CallViewModel(
                     }
                     if (duration > 0) {
                         newDurations[rec.id] = duration
-                        repository.updateDuration(rec.id, duration)
                     }
                 }
             }
@@ -638,8 +638,13 @@ class CallViewModel(
     .flowOn(Dispatchers.Default)
     .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // Caller Profiles: groups all calls by caller/contact
-    val callerProfiles = combine(recordings, completedActionItemKeys, autoAnalyzeTargets) { recs, completedKeys, targets ->
+    // Caller Profiles: groups all calls by caller/contact with debounce and concurrency safety
+    @OptIn(kotlinx.coroutines.FlowPreview::class)
+    val callerProfiles = combine(
+        recordings.debounce(300L),
+        completedActionItemKeys,
+        autoAnalyzeTargets
+    ) { recs, completedKeys, targets ->
         CallerProfileBuilder.buildProfiles(recs, completedKeys, targets)
     }
     .flowOn(Dispatchers.Default)

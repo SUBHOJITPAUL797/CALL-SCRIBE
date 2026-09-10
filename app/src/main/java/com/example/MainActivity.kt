@@ -209,7 +209,7 @@ fun CallScribeApp(viewModel: CallViewModel) {
     val durationMs by viewModel.audioPlayer.durationMs.collectAsStateWithLifecycle()
     val recordingDurations by viewModel.recordingDurations.collectAsStateWithLifecycle()
 
-    LaunchedEffect(recordings) {
+    LaunchedEffect(recordings.size) {
         viewModel.prefetchDurations(context, recordings)
     }
 

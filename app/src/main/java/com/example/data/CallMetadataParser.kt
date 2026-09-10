@@ -17,6 +17,8 @@ enum class CallDirection {
 
 object CallMetadataParser {
 
+    private val metadataCache = java.util.concurrent.ConcurrentHashMap<String, CallMetadata>()
+
     // Matches phone numbers: optional country code, optional groupings (7 to 20 chars)
     private val phoneRegex = Regex("""\+?[0-9][0-9\s\-()]{5,18}[0-9]""")
 
@@ -40,6 +42,13 @@ object CallMetadataParser {
     private val separatorRegex = Regex("""[\s_\-]+""")
 
     fun parse(fileName: String): CallMetadata {
+        metadataCache[fileName]?.let { return it }
+        val result = parseInternal(fileName)
+        metadataCache[fileName] = result
+        return result
+    }
+
+    private fun parseInternal(fileName: String): CallMetadata {
         val baseName = fileName.substringBeforeLast(".")
 
         val direction = when {
@@ -178,6 +187,9 @@ object CallMetadataParser {
 }
 
 object CommitmentExtractor {
+    private val actionItemsCache = java.util.concurrent.ConcurrentHashMap<Int, List<String>>()
+    private val datesCache = java.util.concurrent.ConcurrentHashMap<Int, List<String>>()
+
     private val actionItemHeaderRegex = Regex("""(?im)^[#*_ ]*(?:✅\s*)?(?:action items?|commitments?|to[- ]?dos?|tasks?)[^\n]*$""")
     private val datesHeaderRegex = Regex("""(?im)^[#*_ ]*(?:📅\s*)?(?:dates?|times?|deadlines?|schedules?)[^\n]*$""")
     // Only markdown headers (#) should delineate sections, not bold asterisks (**) which can format bullet points
@@ -185,11 +197,27 @@ object CommitmentExtractor {
     private val numberedBulletRegex = Regex("""^\d+\.\s*""")
 
     fun extractActionItems(summary: String): List<String> {
-        return extractSectionItems(summary, actionItemHeaderRegex)
+        val trimmed = summary.trim()
+        if (trimmed.isBlank() || trimmed.contains("Not Available") || trimmed.contains("Pending AI Analysis") || trimmed.contains("Audio Transcription Required") || trimmed.contains("Transcription requires")) {
+            return emptyList()
+        }
+        val key = trimmed.hashCode()
+        actionItemsCache[key]?.let { return it }
+        val result = extractSectionItems(trimmed, actionItemHeaderRegex)
+        actionItemsCache[key] = result
+        return result
     }
 
     fun extractDates(summary: String): List<String> {
-        return extractSectionItems(summary, datesHeaderRegex)
+        val trimmed = summary.trim()
+        if (trimmed.isBlank() || trimmed.contains("Not Available") || trimmed.contains("Pending AI Analysis") || trimmed.contains("Audio Transcription Required") || trimmed.contains("Transcription requires")) {
+            return emptyList()
+        }
+        val key = trimmed.hashCode()
+        datesCache[key]?.let { return it }
+        val result = extractSectionItems(trimmed, datesHeaderRegex)
+        datesCache[key] = result
+        return result
     }
 
     private fun extractSectionItems(text: String, headerRegex: Regex): List<String> {
