@@ -145,4 +145,28 @@ class CloudflareWorkerTest {
         assertNotNull(message)
         assertTrue(message.contains("Whisper"))
     }
+
+    @Test
+    fun testApiKeyManagerCloudflareDefaults() {
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val keyManager = com.example.data.ApiKeyManager(context)
+
+        // When nothing set, returns default URL
+        assertEquals(com.example.data.ApiKeyManager.DEFAULT_CLOUDFLARE_WORKER_URL, keyManager.getCloudflareWorkerUrl())
+        assertTrue(keyManager.isCloudflareConfigured())
+
+        // When empty string is set, still returns default URL safely
+        keyManager.setCloudflareWorkerUrl("")
+        assertEquals(com.example.data.ApiKeyManager.DEFAULT_CLOUDFLARE_WORKER_URL, keyManager.getCloudflareWorkerUrl())
+        assertTrue(keyManager.isCloudflareConfigured())
+
+        // When valid custom URL is set, returns custom URL
+        keyManager.setCloudflareWorkerUrl("https://my-custom-worker.workers.dev")
+        assertEquals("https://my-custom-worker.workers.dev", keyManager.getCloudflareWorkerUrl())
+        assertTrue(keyManager.isCloudflareConfigured())
+
+        // Reset back
+        keyManager.clearCloudflareConfig()
+        assertEquals(com.example.data.ApiKeyManager.DEFAULT_CLOUDFLARE_WORKER_URL, keyManager.getCloudflareWorkerUrl())
+    }
 }

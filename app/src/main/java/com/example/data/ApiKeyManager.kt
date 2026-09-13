@@ -59,10 +59,9 @@ class ApiKeyManager(context: Context) {
     // ── Cloudflare Worker AI ──────────────────────────────────────────────────
 
     fun getCloudflareWorkerUrl(): String {
-        if (!prefs.contains(KEY_CLOUDFLARE_WORKER_URL)) {
-            return DEFAULT_CLOUDFLARE_WORKER_URL
-        }
-        return prefs.getString(KEY_CLOUDFLARE_WORKER_URL, "")?.trim() ?: ""
+        val saved = prefs.getString(KEY_CLOUDFLARE_WORKER_URL, "")?.trim() ?: ""
+        if (saved.isNotBlank()) return saved
+        return DEFAULT_CLOUDFLARE_WORKER_URL
     }
 
     fun setCloudflareWorkerUrl(url: String) {

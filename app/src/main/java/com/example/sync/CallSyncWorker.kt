@@ -112,9 +112,15 @@ class CallSyncWorker(
 
                     // 2. Check if this call matches the user's Auto-Analyze rule
                     val shouldAutoAnalyze = CallMetadataParser.matchesAutoAnalyzeRule(fileInfo.name, mode, targets)
-                    val hasAnyEngine = geminiRepo.isApiKeyConfigured() || nvidiaRepo.isApiKeyConfigured() || cloudflareRepo.isConfigured() || preferredEngine == PreferredEngine.ON_DEVICE
+                    val hasRequiredEngine = when (preferredEngine) {
+                        PreferredEngine.CLOUDFLARE -> cloudflareRepo.isConfigured()
+                        PreferredEngine.GEMINI -> geminiRepo.isApiKeyConfigured()
+                        PreferredEngine.NVIDIA -> (cloudflareRepo.isConfigured() || geminiRepo.isApiKeyConfigured()) && nvidiaRepo.isApiKeyConfigured()
+                        PreferredEngine.ON_DEVICE -> true
+                        PreferredEngine.AUTO -> geminiRepo.isApiKeyConfigured() || nvidiaRepo.isApiKeyConfigured() || cloudflareRepo.isConfigured()
+                    }
 
-                    filesToProcess.add(Triple(fileInfo, insertedId, shouldAutoAnalyze && hasAnyEngine))
+                    filesToProcess.add(Triple(fileInfo, insertedId, shouldAutoAnalyze && hasRequiredEngine))
                 }
             } // Mutex ends immediately after scanning & placeholder creation!
         } catch (_: SecurityException) {
@@ -320,22 +326,37 @@ class CallSyncWorker(
         }
 
         // 1. Try Cloudflare Worker first if preferred, AUTO, or NVIDIA preferred
-        val tryCloudflareFirst = (preferredEngine == PreferredEngine.CLOUDFLARE || preferredEngine == PreferredEngine.AUTO || preferredEngine == PreferredEngine.NVIDIA) && cloudflareRepo.isConfigured()
+        val tryCloudflareFirst = when (preferredEngine) {
+            PreferredEngine.CLOUDFLARE -> cloudflareRepo.isConfigured()
+            PreferredEngine.AUTO, PreferredEngine.NVIDIA -> cloudflareRepo.isConfigured()
+            else -> false
+        }
         if (tryCloudflareFirst && fileSize <= maxFileSizeCloudflare) {
-            audioBytes = readAudioBytes(context, uri, maxFileSizeCloudflare)
-            if (audioBytes != null) {
-                val cfRes = cloudflareRepo.analyzeAudio(audioBytes, fileName, resolvedMime, spokenLanguage)
+            val bytes = readAudioBytes(context, uri, maxFileSizeCloudflare)
+            if (bytes != null) {
+                val cfRes = cloudflareRepo.analyzeAudio(bytes, fileName, resolvedMime, spokenLanguage)
                 if (cfRes.isSuccess) {
                     val pair = cfRes.getOrThrow()
                     transcription = pair.first
                     summary = pair.second
                 }
+                if (transcription.isNotBlank()) {
+                    audioBytes = null
+                } else if (fileSize <= maxFileSizeGemini && preferredEngine != PreferredEngine.CLOUDFLARE) {
+                    audioBytes = bytes
+                }
             }
         }
 
         // 2. Try Gemini (if preferred, or if Cloudflare wasn't configured / gave no speech in AUTO/NVIDIA mode)
+        // STRICT: Never fall through to Gemini when user explicitly selected CLOUDFLARE!
         val cloudflareGaveNoSpeech = isUnusableTranscription(transcription, summary)
-        val tryGemini = (preferredEngine == PreferredEngine.GEMINI || ((preferredEngine == PreferredEngine.AUTO || preferredEngine == PreferredEngine.NVIDIA) && cloudflareGaveNoSpeech) || transcription.isBlank()) && geminiRepo.isApiKeyConfigured()
+        val tryGemini = when (preferredEngine) {
+            PreferredEngine.GEMINI -> geminiRepo.isApiKeyConfigured()
+            PreferredEngine.AUTO, PreferredEngine.NVIDIA -> (cloudflareGaveNoSpeech || transcription.isBlank()) && geminiRepo.isApiKeyConfigured()
+            PreferredEngine.CLOUDFLARE -> false // STRICT: Never secretly call Gemini in CLOUDFLARE mode!
+            PreferredEngine.ON_DEVICE -> false
+        }
         if (tryGemini && fileSize <= maxFileSizeGemini) {
             val bytes = audioBytes ?: readAudioBytes(context, uri, maxFileSizeGemini)
             audioBytes = null // Release raw byte reference before Base64 encoding
@@ -359,8 +380,8 @@ class CallSyncWorker(
             }
         }
 
-        // 3. Fallback to Cloudflare if Gemini was preferred but failed, and Cloudflare wasn't tried yet
-        if (transcription.isBlank() && !tryCloudflareFirst && cloudflareRepo.isConfigured() && fileSize <= maxFileSizeCloudflare) {
+        // 3. Fallback to Cloudflare ONLY in AUTO mode if Gemini failed, and Cloudflare wasn't tried yet
+        if (transcription.isBlank() && preferredEngine == PreferredEngine.AUTO && !tryCloudflareFirst && cloudflareRepo.isConfigured() && fileSize <= maxFileSizeCloudflare) {
             val bytes = readAudioBytes(context, uri, maxFileSizeCloudflare)
             if (bytes != null) {
                 val cfRes = cloudflareRepo.analyzeAudio(bytes, fileName, resolvedMime, spokenLanguage)

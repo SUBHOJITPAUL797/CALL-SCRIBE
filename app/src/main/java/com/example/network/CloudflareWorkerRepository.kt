@@ -273,33 +273,46 @@ class CloudflareWorkerRepository(
                 }
 
                 if (response.isSuccessful) {
-                    val json = JSONObject(body)
-                    val transcription = json.optString("transcription", json.optString("text", "")).trim()
-                    val summary = json.optString("summary", "").trim()
-                    if (summary.isNotBlank()) {
+                    val json = try { JSONObject(body) } catch (_: Exception) { null }
+                    val transcription = json?.optString("transcription", json.optString("text", ""))?.trim() ?: ""
+                    var summary = json?.optString("summary", "")?.trim() ?: ""
+                    if (summary.isNotBlank() || transcription.isNotBlank()) {
                         val finalTrans = if (transcription.isNotBlank()) transcription else "(No audible speech detected)"
-                        return@withContext Result.success(Pair(finalTrans, summary))
+                        if (summary.isBlank() && transcription.isNotBlank()) {
+                            val sumRes = summarizeTranscript(finalTrans, fileName)
+                            summary = sumRes.getOrDefault("Summary unavailable.")
+                        }
+                        return@withContext Result.success(Pair(finalTrans, summary.ifBlank { "Analysis complete." }))
                     }
                 }
                 Pair(code, body)
             }
 
-            // Fallback to separate endpoints if /analyze endpoint returned 404 (e.g. older worker script)
-            if (code == 404) {
+            // Fallback to separate endpoints if /analyze returned 404 or server error (e.g. 500/502/504/524)
+            if (code == 404 || code in 500..599) {
                 val transResult = transcribeAudio(audioBytes, fileName, mimeType, language)
-                if (transResult.isFailure) {
-                    return@withContext Result.failure(transResult.exceptionOrNull() ?: Exception("Transcription failed"))
+                if (transResult.isSuccess) {
+                    val trans = transResult.getOrThrow()
+                    val sumResult = summarizeTranscript(trans, fileName)
+                    val sum = sumResult.getOrDefault("Summary unavailable.")
+                    return@withContext Result.success(Pair(trans, sum))
                 }
-                val trans = transResult.getOrThrow()
-                val sumResult = summarizeTranscript(trans, fileName)
-                val sum = sumResult.getOrDefault("")
-                return@withContext Result.success(Pair(trans, sum))
             }
 
             val errMsg = try { JSONObject(body).optString("error", body) } catch (_: Exception) { body }
             Result.failure(Exception("Cloudflare analysis failed (HTTP $code): ${errMsg.take(200)}"))
         } catch (e: Throwable) {
             if (e is kotlinx.coroutines.CancellationException) throw e
+            // If /analyze timed out or failed with network error, attempt direct /transcribe as fallback
+            try {
+                val transResult = transcribeAudio(audioBytes, fileName, mimeType, language)
+                if (transResult.isSuccess) {
+                    val trans = transResult.getOrThrow()
+                    val sumResult = summarizeTranscript(trans, fileName)
+                    val sum = sumResult.getOrDefault("Summary unavailable.")
+                    return@withContext Result.success(Pair(trans, sum))
+                }
+            } catch (_: Throwable) {}
             Result.failure(Exception("Cloudflare analysis failed: ${e.localizedMessage}", e))
         }
     }
