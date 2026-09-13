@@ -2129,8 +2129,20 @@ fun RecordingCard(
     var showMenu by remember { mutableStateOf(false) }
     val dateFormat = remember { SimpleDateFormat("MMM dd, yyyy - HH:mm", Locale.getDefault()) }
     val metadata = remember(recording.title) { CallMetadataParser.parse(recording.title) }
-    val actionItems = remember(recording.decodedSummary) { CommitmentExtractor.extractActionItems(recording.decodedSummary) }
-    val dates = remember(recording.decodedSummary) { CommitmentExtractor.extractDates(recording.decodedSummary) }
+    val displaySummary = remember(recording.decodedSummary, recording.decodedTranscription) {
+        if (com.example.ui.CallViewModel.isPlaceholderSummary(recording.decodedSummary) &&
+            recording.decodedTranscription.isNotBlank() &&
+            recording.decodedTranscription != com.example.data.TranscriptionValidator.NO_SPEECH_DETECTED &&
+            !recording.decodedTranscription.contains("Audio Transcription Required") &&
+            !recording.decodedTranscription.contains("Transcription requires") &&
+            !recording.decodedTranscription.contains("On-Device Speech Analysis")) {
+            com.example.data.LocalAnalysisEngine.analyzeLocally(recording.decodedTranscription, recording.title).second
+        } else {
+            recording.decodedSummary
+        }
+    }
+    val actionItems = remember(displaySummary) { CommitmentExtractor.extractActionItems(displaySummary) }
+    val dates = remember(displaySummary) { CommitmentExtractor.extractDates(displaySummary) }
 
     Box(
         modifier = Modifier
@@ -2424,16 +2436,17 @@ fun RecordingCard(
                         }
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = recording.decodedSummary,
+                            text = displaySummary,
                             style = MaterialTheme.typography.bodyMedium,
                             color = Color.Black,
                             fontWeight = FontWeight.Bold
                         )
-                        val needsAiTranscription = recording.decodedSummary.contains("Not Available") ||
-                            recording.decodedSummary.contains("Pending AI Analysis") ||
+                        val needsAiTranscription = com.example.ui.CallViewModel.isPlaceholderSummary(recording.decodedSummary) ||
+                            !recording.decodedSummary.contains("##") ||
                             recording.decodedTranscription.contains("Audio Transcription Required") ||
                             recording.decodedTranscription.contains("Transcription requires") ||
                             recording.decodedTranscription.contains("On-Device Speech Analysis") ||
+                            recording.decodedTranscription.contains("No audible speech detected") ||
                             recording.decodedTranscription.isBlank()
 
                         if (isAnalyzing) {

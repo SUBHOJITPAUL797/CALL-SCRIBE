@@ -394,16 +394,19 @@ class CallSyncWorker(
         }
 
         // 4. Summarization fallback / NVIDIA priority
-        if (transcription.isNotBlank()) {
+        if (transcription.isNotBlank() && transcription != TranscriptionValidator.NO_SPEECH_DETECTED) {
+            if (com.example.ui.CallViewModel.isPlaceholderSummary(summary)) {
+                summary = ""
+            }
             if ((preferredEngine == PreferredEngine.NVIDIA || summary.isBlank()) && nvidiaRepo.isApiKeyConfigured()) {
                 val sumRes = nvidiaRepo.summarizeTranscript(transcription, fileName)
-                if (sumRes.isSuccess) summary = sumRes.getOrThrow()
+                if (sumRes.isSuccess && sumRes.getOrThrow().isNotBlank()) summary = sumRes.getOrThrow()
             }
             if (summary.isBlank() && cloudflareRepo.isConfigured()) {
                 val cfSum = cloudflareRepo.summarizeTranscript(transcription, fileName)
-                if (cfSum.isSuccess) summary = cfSum.getOrThrow()
+                if (cfSum.isSuccess && cfSum.getOrThrow().isNotBlank()) summary = cfSum.getOrThrow()
             }
-            if (summary.isBlank()) {
+            if (summary.isBlank() || com.example.ui.CallViewModel.isPlaceholderSummary(summary)) {
                 val (_, locSum) = LocalAnalysisEngine.analyzeLocally(transcription, fileName)
                 summary = locSum
             }
@@ -414,7 +417,7 @@ class CallSyncWorker(
             val (locTrans, locSum) = LocalAnalysisEngine.analyzeLocally("", fileName)
             transcription = locTrans
             summary = locSum
-        } else if (summary.isBlank()) {
+        } else if (summary.isBlank() || com.example.ui.CallViewModel.isPlaceholderSummary(summary)) {
             val (_, locSum) = LocalAnalysisEngine.analyzeLocally(transcription, fileName)
             summary = locSum
         }

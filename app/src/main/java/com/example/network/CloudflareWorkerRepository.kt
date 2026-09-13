@@ -68,6 +68,7 @@ class CloudflareWorkerRepository(
             val pingRequest = Request.Builder()
                 .url("$baseUrl/health")
                 .apply {
+                    addHeader("User-Agent", "CallScribe-Android/1.6.6")
                     if (token.isNotBlank()) {
                         addHeader("Authorization", "Bearer $token")
                     }
@@ -136,6 +137,7 @@ class CloudflareWorkerRepository(
             val request = Request.Builder()
                 .url(url)
                 .apply {
+                    addHeader("User-Agent", "CallScribe-Android/1.6.6")
                     if (token.isNotBlank()) {
                         addHeader("Authorization", "Bearer $token")
                     }
@@ -156,7 +158,12 @@ class CloudflareWorkerRepository(
 
                 if (!response.isSuccessful) {
                     val errMsg = try { JSONObject(body).optString("error", body) } catch (_: Exception) { body }
-                    return@withContext Result.failure(Exception("Cloudflare Worker error (HTTP $code): ${errMsg.take(200)}"))
+                    val cleanErr = if (errMsg.contains("3006") || errMsg.contains("too large", ignoreCase = true)) {
+                        "Audio file exceeds Cloudflare Whisper model limit. Please select Google Gemini in Settings."
+                    } else {
+                        errMsg.take(200)
+                    }
+                    return@withContext Result.failure(Exception("Cloudflare Worker error (HTTP $code): $cleanErr"))
                 }
 
                 val json = JSONObject(body)
@@ -198,6 +205,7 @@ class CloudflareWorkerRepository(
             val request = Request.Builder()
                 .url("$baseUrl/summarize")
                 .apply {
+                    addHeader("User-Agent", "CallScribe-Android/1.6.6")
                     if (token.isNotBlank()) {
                         addHeader("Authorization", "Bearer $token")
                     }
@@ -254,6 +262,7 @@ class CloudflareWorkerRepository(
             val request = Request.Builder()
                 .url(url)
                 .apply {
+                    addHeader("User-Agent", "CallScribe-Android/1.6.6")
                     if (token.isNotBlank()) {
                         addHeader("Authorization", "Bearer $token")
                     }
@@ -278,11 +287,11 @@ class CloudflareWorkerRepository(
                     var summary = json?.optString("summary", "")?.trim() ?: ""
                     if (summary.isNotBlank() || transcription.isNotBlank()) {
                         val finalTrans = if (transcription.isNotBlank()) transcription else "(No audible speech detected)"
-                        if (summary.isBlank() && transcription.isNotBlank()) {
+                        if (summary.isBlank() && transcription.isNotBlank() && transcription != "(No audible speech detected)") {
                             val sumRes = summarizeTranscript(finalTrans, fileName)
-                            summary = sumRes.getOrDefault("Summary unavailable.")
+                            summary = sumRes.getOrDefault("")
                         }
-                        return@withContext Result.success(Pair(finalTrans, summary.ifBlank { "Analysis complete." }))
+                        return@withContext Result.success(Pair(finalTrans, summary.trim()))
                     }
                 }
                 Pair(code, body)
@@ -294,13 +303,18 @@ class CloudflareWorkerRepository(
                 if (transResult.isSuccess) {
                     val trans = transResult.getOrThrow()
                     val sumResult = summarizeTranscript(trans, fileName)
-                    val sum = sumResult.getOrDefault("Summary unavailable.")
-                    return@withContext Result.success(Pair(trans, sum))
+                    val sum = sumResult.getOrDefault("")
+                    return@withContext Result.success(Pair(trans, sum.trim()))
                 }
             }
 
             val errMsg = try { JSONObject(body).optString("error", body) } catch (_: Exception) { body }
-            Result.failure(Exception("Cloudflare analysis failed (HTTP $code): ${errMsg.take(200)}"))
+            val cleanErr = if (errMsg.contains("3006") || errMsg.contains("too large", ignoreCase = true)) {
+                "Audio file exceeds Cloudflare Workers AI input limit. Please select Google Gemini in Settings or use a shorter recording."
+            } else {
+                errMsg.take(200)
+            }
+            Result.failure(Exception("Cloudflare analysis failed (HTTP $code): $cleanErr"))
         } catch (e: Throwable) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             // If /analyze timed out or failed with network error, attempt direct /transcribe as fallback
@@ -309,8 +323,8 @@ class CloudflareWorkerRepository(
                 if (transResult.isSuccess) {
                     val trans = transResult.getOrThrow()
                     val sumResult = summarizeTranscript(trans, fileName)
-                    val sum = sumResult.getOrDefault("Summary unavailable.")
-                    return@withContext Result.success(Pair(trans, sum))
+                    val sum = sumResult.getOrDefault("")
+                    return@withContext Result.success(Pair(trans, sum.trim()))
                 }
             } catch (_: Throwable) {}
             Result.failure(Exception("Cloudflare analysis failed: ${e.localizedMessage}", e))
@@ -358,6 +372,7 @@ Provide a direct, helpful, and concise answer based strictly on the conversation
             val request = Request.Builder()
                 .url(url)
                 .apply {
+                    addHeader("User-Agent", "CallScribe-Android/1.6.6")
                     if (token.isNotBlank()) {
                         addHeader("Authorization", "Bearer $token")
                     }

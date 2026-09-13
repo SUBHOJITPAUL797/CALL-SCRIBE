@@ -632,7 +632,34 @@ class CallViewModel(
     }
 
     val recordings = combine(repository.allRecordings, searchQuery) { list, query ->
-        val distinctList = list.distinctBy { it.sourceUri ?: it.id.toString() }
+        val distinctList = list
+            .groupBy { it.sourceUri ?: it.id.toString() }
+            .values
+            .map { group ->
+                // If there are duplicate rows for the same sourceUri, pick the one with real analysis
+                group.firstOrNull { hasRealAnalysis(it) }
+                    ?: group.firstOrNull { !isPlaceholderSummary(it.decodedSummary) }
+                    ?: group.maxByOrNull { it.id }
+                    ?: group.first()
+            }
+            .map { rec ->
+                // Auto-repair any database entries that have real transcription but fake placeholder summary
+                if (isPlaceholderSummary(rec.decodedSummary) && rec.decodedTranscription.isNotBlank() &&
+                    rec.decodedTranscription != TranscriptionValidator.NO_SPEECH_DETECTED &&
+                    !rec.decodedTranscription.contains("Audio Transcription Required") &&
+                    !rec.decodedTranscription.contains("Transcription requires") &&
+                    !rec.decodedTranscription.contains("On-Device Speech Analysis")) {
+                    val (_, localSum) = LocalAnalysisEngine.analyzeLocally(rec.decodedTranscription, rec.title)
+                    viewModelScope.launch(Dispatchers.IO) {
+                        try {
+                            repository.insert(rec.copy(summaryEncrypted = SimpleEncryption.encrypt(localSum)))
+                        } catch (_: Throwable) {}
+                    }
+                    rec.copy(summaryEncrypted = SimpleEncryption.encrypt(localSum))
+                } else {
+                    rec
+                }
+            }
             .sortedByDescending { it.timestamp }
 
         if (!hasRepairedTimestamps && distinctList.isNotEmpty()) {
@@ -1320,17 +1347,24 @@ class CallViewModel(
                 }
 
                 // ── Mode 5: Summarization fallback / NVIDIA priority ───
-                if (transcription.isNotBlank()) {
+                if (transcription.isNotBlank() && transcription != TranscriptionValidator.NO_SPEECH_DETECTED) {
+                    if (isPlaceholderSummary(summary)) {
+                        summary = ""
+                    }
                     // If NVIDIA is preferred or summary is blank, let NVIDIA summarize if available
                     if ((currentEngine == PreferredEngine.NVIDIA || summary.isBlank()) && isNvidiaKeyConfigured()) {
                         val sumResult = nvidiaRepository?.summarizeTranscript(transcription, fileName)
-                        if (sumResult?.isSuccess == true) summary = sumResult.getOrThrow()
+                        if (sumResult?.isSuccess == true && sumResult.getOrThrow().isNotBlank()) {
+                            summary = sumResult.getOrThrow()
+                        }
                     }
                     if (summary.isBlank() && isCloudflareConfigured() && (currentEngine == PreferredEngine.CLOUDFLARE || currentEngine == PreferredEngine.AUTO)) {
                         val cfSum = cloudflareRepository?.summarizeTranscript(transcription, fileName)
-                        if (cfSum?.isSuccess == true) summary = cfSum.getOrThrow()
+                        if (cfSum?.isSuccess == true && cfSum.getOrThrow().isNotBlank()) {
+                            summary = cfSum.getOrThrow()
+                        }
                     }
-                    if (summary.isBlank()) {
+                    if (summary.isBlank() || isPlaceholderSummary(summary)) {
                         val (_, localSum) = LocalAnalysisEngine.analyzeLocally(transcription, fileName)
                         summary = localSum
                     }
@@ -1357,7 +1391,7 @@ class CallViewModel(
                     val (localTrans, localSum) = LocalAnalysisEngine.analyzeLocally("", fileName)
                     transcription = localTrans
                     summary = localSum
-                } else if (summary.isBlank()) {
+                } else if (summary.isBlank() || isPlaceholderSummary(summary)) {
                     val (_, localSum) = LocalAnalysisEngine.analyzeLocally(transcription, fileName)
                     summary = localSum
                 }
@@ -1488,8 +1522,10 @@ class CallViewModel(
                     if (result.isSuccess) {
                         android.util.Log.i("CallScribe", "Analysis succeeded for id=${recording.id}")
                         val updated = withContext(Dispatchers.IO) {
-                            try { repository.getByUri(uriStr) } catch (e: Throwable) {
-                                android.util.Log.e("CallScribe", "repository.getByUri failed: ${e.localizedMessage}", e)
+                            try {
+                                repository.getById(recording.id) ?: repository.getByUri(uriStr)
+                            } catch (e: Throwable) {
+                                android.util.Log.e("CallScribe", "repository lookup failed: ${e.localizedMessage}", e)
                                 null
                             }
                         }
@@ -1517,8 +1553,11 @@ class CallViewModel(
                                 android.util.Log.w("CallScribe", "notifyCommitments failed: ${t.localizedMessage}", t)
                             }
                         }
-                        if (updated != null && !updated.decodedSummary.contains("Not Available") && !updated.decodedSummary.contains("Pending")) {
+                        val hasValidSummary = updated != null && hasRealAnalysis(updated)
+                        if (hasValidSummary) {
                             updateStatusMessage.value = "Analysis complete! ✅"
+                        } else if (updated != null && (updated.decodedTranscription.equals(TranscriptionValidator.NO_SPEECH_DETECTED, ignoreCase = true) || updated.decodedTranscription.contains("No speech detected", ignoreCase = true))) {
+                            updateStatusMessage.value = "⚠️ No audible speech detected in this recording."
                         } else {
                             updateStatusMessage.value = "⚠️ Could not transcribe audio. Check AI Engine settings."
                         }
@@ -1590,6 +1629,32 @@ class CallViewModel(
             context.startActivity(intent)
         } catch (e: Exception) {
             Toast.makeText(context, "No calendar application available.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    companion object {
+        fun isPlaceholderSummary(summary: String?): Boolean {
+            if (summary.isNullOrBlank()) return true
+            val trimmed = summary.trim()
+            return trimmed == "Analysis complete." ||
+                trimmed == "Summary unavailable." ||
+                trimmed.contains("Pending AI Analysis") ||
+                trimmed.contains("AI Analysis Not Available") ||
+                trimmed.equals("No speech detected.", ignoreCase = true)
+        }
+
+        fun hasRealAnalysis(recording: Recording): Boolean {
+            val sum = recording.decodedSummary.trim()
+            val trans = recording.decodedTranscription.trim()
+            if (isPlaceholderSummary(sum)) return false
+            if (trans.isBlank() ||
+                trans.contains("Audio Transcription Required") ||
+                trans.contains("Transcription requires") ||
+                trans.contains("On-Device Speech Analysis") ||
+                trans.equals(TranscriptionValidator.NO_SPEECH_DETECTED, ignoreCase = true)) {
+                return false
+            }
+            return true
         }
     }
 
