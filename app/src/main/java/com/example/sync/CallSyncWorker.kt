@@ -340,21 +340,19 @@ class CallSyncWorker(
                     transcription = pair.first
                     summary = pair.second
                 }
-                if (transcription.isNotBlank()) {
+                if (transcription.isNotBlank() && !isUnusableTranscription(transcription, summary)) {
                     audioBytes = null
-                } else if (fileSize <= maxFileSizeGemini && preferredEngine != PreferredEngine.CLOUDFLARE) {
+                } else if (fileSize <= maxFileSizeGemini && geminiRepo.isApiKeyConfigured()) {
                     audioBytes = bytes
                 }
             }
         }
 
-        // 2. Try Gemini (if preferred, or if Cloudflare wasn't configured / gave no speech in AUTO/NVIDIA mode)
-        // STRICT: Never fall through to Gemini when user explicitly selected CLOUDFLARE!
+        // 2. Try Gemini (if preferred, or if Cloudflare wasn't configured / failed / gave no speech)
         val cloudflareGaveNoSpeech = isUnusableTranscription(transcription, summary)
         val tryGemini = when (preferredEngine) {
             PreferredEngine.GEMINI -> geminiRepo.isApiKeyConfigured()
-            PreferredEngine.AUTO, PreferredEngine.NVIDIA -> (cloudflareGaveNoSpeech || transcription.isBlank()) && geminiRepo.isApiKeyConfigured()
-            PreferredEngine.CLOUDFLARE -> false // STRICT: Never secretly call Gemini in CLOUDFLARE mode!
+            PreferredEngine.AUTO, PreferredEngine.NVIDIA, PreferredEngine.CLOUDFLARE -> (cloudflareGaveNoSpeech || transcription.isBlank()) && geminiRepo.isApiKeyConfigured()
             PreferredEngine.ON_DEVICE -> false
         }
         if (tryGemini && fileSize <= maxFileSizeGemini) {

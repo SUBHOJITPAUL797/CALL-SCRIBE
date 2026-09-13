@@ -1237,7 +1237,7 @@ class CallViewModel(
         fileSize: Long,
         existingId: Int? = null,
         fileLastModified: Long = 0L
-    ): Result<Unit> {
+    ): Result<Boolean> {
         return try {
             val contentResolver = context.contentResolver
             val resolvedMime = mimeType ?: contentResolver.getType(uri) ?: "audio/mp3"
@@ -1246,6 +1246,7 @@ class CallViewModel(
             var summary = ""
             var audioBytes: ByteArray? = null
             var lastEngineError: Throwable? = null
+            var usedGeminiFailover = false
             val currentEngine = preferredEngine.value
 
             // ── Mode 0: Explicit On-Device Offline Selection ─────────────────────────────
@@ -1275,21 +1276,19 @@ class CallViewModel(
                         } else {
                             lastEngineError = cfResult?.exceptionOrNull()
                         }
-                        if (transcription.isNotBlank()) {
+                        if (transcription.isNotBlank() && !isUnusableTranscription(transcription, summary)) {
                             audioBytes = null
-                        } else if (fileSize <= MAX_FILE_SIZE_GEMINI && currentEngine != PreferredEngine.CLOUDFLARE) {
+                        } else if (fileSize <= MAX_FILE_SIZE_GEMINI && isApiKeyConfigured()) {
                             audioBytes = bytes
                         }
                     }
                 }
 
-                // ── Mode 2: Try Gemini (if preferred, or if Cloudflare wasn't configured / gave no speech in AUTO/NVIDIA mode) ─
-                // STRICT: Never fall through to Gemini when user explicitly selected CLOUDFLARE!
+                // ── Mode 2: Try Gemini (if preferred, or if Cloudflare wasn't configured / failed / gave no speech) ─
                 val cloudflareGaveNoSpeech = isUnusableTranscription(transcription, summary)
                 val tryGemini = when (currentEngine) {
                     PreferredEngine.GEMINI -> isApiKeyConfigured()
-                    PreferredEngine.AUTO, PreferredEngine.NVIDIA -> (cloudflareGaveNoSpeech || transcription.isBlank()) && isApiKeyConfigured()
-                    PreferredEngine.CLOUDFLARE -> false // STRICT: Never secretly call Gemini in CLOUDFLARE mode!
+                    PreferredEngine.AUTO, PreferredEngine.NVIDIA, PreferredEngine.CLOUDFLARE -> (cloudflareGaveNoSpeech || transcription.isBlank()) && isApiKeyConfigured()
                     PreferredEngine.ON_DEVICE -> false
                 }
                 if (tryGemini && fileSize <= MAX_FILE_SIZE_GEMINI) {
@@ -1318,6 +1317,9 @@ class CallViewModel(
                                 if (!isUnusableTranscription(pair.first, pair.second) || transcription.isBlank() || isUnusableTranscription(transcription, summary)) {
                                     transcription = pair.first
                                     summary = pair.second
+                                    if (currentEngine == PreferredEngine.CLOUDFLARE || currentEngine == PreferredEngine.AUTO) {
+                                        usedGeminiFailover = true
+                                    }
                                 }
                             } else {
                                 lastEngineError = geminiResult.exceptionOrNull()
@@ -1375,9 +1377,10 @@ class CallViewModel(
                     if (currentEngine != PreferredEngine.ON_DEVICE) {
                         val reportedErr = lastEngineError ?: when (currentEngine) {
                             PreferredEngine.CLOUDFLARE -> when {
-                                fileSize > MAX_FILE_SIZE_CLOUDFLARE -> Exception("Audio file (${fileSize / (1024 * 1024)}MB) exceeds Cloudflare limit (24MB).")
+                                fileSize > MAX_FILE_SIZE_CLOUDFLARE -> Exception("Audio file (${fileSize / (1024 * 1024)}MB) exceeds Cloudflare limit (24MB). Please select Google Gemini in 🔑 Settings.")
                                 !isCloudflareConfigured() -> Exception("Cloudflare Worker URL is not configured.")
-                                else -> Exception("Cloudflare Whisper could not detect speech in this recording.")
+                                !isApiKeyConfigured() -> Exception("Cloudflare Whisper cannot decode mobile call audio (.m4a/.amr). Please select Google Gemini in 🔑 Settings for full call transcription.")
+                                else -> Exception("Cloudflare Whisper could not detect speech in this recording. Please try Google Gemini.")
                             }
                             PreferredEngine.GEMINI -> when {
                                 fileSize > MAX_FILE_SIZE_GEMINI -> Exception("Audio file (${fileSize / (1024 * 1024)}MB) exceeds Gemini limit (15MB).")
@@ -1416,7 +1419,7 @@ class CallViewModel(
                 durationMs = duration
             )
             repository.insert(recording)
-            Result.success(Unit)
+            Result.success(usedGeminiFailover)
         } catch (oom: OutOfMemoryError) {
             android.util.Log.e("CallScribe", "OutOfMemoryError in processAudioFile: ${oom.localizedMessage}. Invoking GC.", oom)
             System.gc()
@@ -1554,8 +1557,13 @@ class CallViewModel(
                             }
                         }
                         val hasValidSummary = updated != null && hasRealAnalysis(updated)
+                        val usedFailover = result.getOrDefault(false)
                         if (hasValidSummary) {
-                            updateStatusMessage.value = "Analysis complete! ✅"
+                            if (usedFailover) {
+                                updateStatusMessage.value = "Analysis complete via Google Gemini (Cloudflare audio format limit reached) ✅"
+                            } else {
+                                updateStatusMessage.value = "Analysis complete! ✅"
+                            }
                         } else if (updated != null && (updated.decodedTranscription.equals(TranscriptionValidator.NO_SPEECH_DETECTED, ignoreCase = true) || updated.decodedTranscription.contains("No speech detected", ignoreCase = true))) {
                             updateStatusMessage.value = "⚠️ No audible speech detected in this recording."
                         } else {
@@ -1570,8 +1578,17 @@ class CallViewModel(
                         } else if (err?.message?.contains("429") == true) {
                             updateStatusMessage.value = "⏳ Rate limit reached. Resets in 60s. Please wait!"
                         } else {
-                            val errorDetails = err?.localizedMessage ?: err?.javaClass?.simpleName ?: "Unknown error"
-                            updateStatusMessage.value = "Analysis failed: $errorDetails"
+                            val rawMsg = err?.localizedMessage ?: err?.javaClass?.simpleName ?: "Unknown error"
+                            val cleanMsg = when {
+                                rawMsg.contains("3010") || rawMsg.contains("Invalid audio input", ignoreCase = true) ->
+                                    "Cloudflare Whisper cannot decode mobile call audio (.m4a/.amr). Please select Google Gemini in 🔑 Settings."
+                                rawMsg.contains("3006") || rawMsg.contains("too large", ignoreCase = true) ->
+                                    "Audio exceeds Cloudflare Whisper model limit. Please select Google Gemini in 🔑 Settings for full calls."
+                                rawMsg.contains("1102") || rawMsg.contains("503") ->
+                                    "Cloudflare Worker execution limit reached on long recording. Please select Google Gemini in 🔑 Settings for full calls."
+                                else -> rawMsg
+                            }
+                            updateStatusMessage.value = "Analysis failed: $cleanMsg"
                         }
                     }
                 } catch (t: Throwable) {

@@ -68,7 +68,7 @@ class CloudflareWorkerRepository(
             val pingRequest = Request.Builder()
                 .url("$baseUrl/health")
                 .apply {
-                    addHeader("User-Agent", "CallScribe-Android/1.6.6")
+                    addHeader("User-Agent", "CallScribe-Android/1.6.7")
                     if (token.isNotBlank()) {
                         addHeader("Authorization", "Bearer $token")
                     }
@@ -137,7 +137,7 @@ class CloudflareWorkerRepository(
             val request = Request.Builder()
                 .url(url)
                 .apply {
-                    addHeader("User-Agent", "CallScribe-Android/1.6.6")
+                    addHeader("User-Agent", "CallScribe-Android/1.6.7")
                     if (token.isNotBlank()) {
                         addHeader("Authorization", "Bearer $token")
                     }
@@ -158,11 +158,7 @@ class CloudflareWorkerRepository(
 
                 if (!response.isSuccessful) {
                     val errMsg = try { JSONObject(body).optString("error", body) } catch (_: Exception) { body }
-                    val cleanErr = if (errMsg.contains("3006") || errMsg.contains("too large", ignoreCase = true)) {
-                        "Audio file exceeds Cloudflare Whisper model limit. Please select Google Gemini in Settings."
-                    } else {
-                        errMsg.take(200)
-                    }
+                    val cleanErr = formatWorkerError(code, errMsg)
                     return@withContext Result.failure(Exception("Cloudflare Worker error (HTTP $code): $cleanErr"))
                 }
 
@@ -205,7 +201,7 @@ class CloudflareWorkerRepository(
             val request = Request.Builder()
                 .url("$baseUrl/summarize")
                 .apply {
-                    addHeader("User-Agent", "CallScribe-Android/1.6.6")
+                    addHeader("User-Agent", "CallScribe-Android/1.6.7")
                     if (token.isNotBlank()) {
                         addHeader("Authorization", "Bearer $token")
                     }
@@ -262,7 +258,7 @@ class CloudflareWorkerRepository(
             val request = Request.Builder()
                 .url(url)
                 .apply {
-                    addHeader("User-Agent", "CallScribe-Android/1.6.6")
+                    addHeader("User-Agent", "CallScribe-Android/1.6.7")
                     if (token.isNotBlank()) {
                         addHeader("Authorization", "Bearer $token")
                     }
@@ -309,11 +305,7 @@ class CloudflareWorkerRepository(
             }
 
             val errMsg = try { JSONObject(body).optString("error", body) } catch (_: Exception) { body }
-            val cleanErr = if (errMsg.contains("3006") || errMsg.contains("too large", ignoreCase = true)) {
-                "Audio file exceeds Cloudflare Workers AI input limit. Please select Google Gemini in Settings or use a shorter recording."
-            } else {
-                errMsg.take(200)
-            }
+            val cleanErr = formatWorkerError(code, errMsg)
             Result.failure(Exception("Cloudflare analysis failed (HTTP $code): $cleanErr"))
         } catch (e: Throwable) {
             if (e is kotlinx.coroutines.CancellationException) throw e
@@ -372,7 +364,7 @@ Provide a direct, helpful, and concise answer based strictly on the conversation
             val request = Request.Builder()
                 .url(url)
                 .apply {
-                    addHeader("User-Agent", "CallScribe-Android/1.6.6")
+                    addHeader("User-Agent", "CallScribe-Android/1.6.7")
                     if (token.isNotBlank()) {
                         addHeader("Authorization", "Bearer $token")
                     }
@@ -400,6 +392,20 @@ Provide a direct, helpful, and concise answer based strictly on the conversation
         } catch (e: Throwable) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(Exception("Cloudflare chat failed: ${e.localizedMessage}", e))
+        }
+    }
+
+    companion object {
+        fun formatWorkerError(code: Int, errMsg: String): String {
+            return when {
+                errMsg.contains("3010") || errMsg.contains("Invalid audio input", ignoreCase = true) ->
+                    "Cloudflare Whisper cannot decode mobile call audio (.m4a/.amr). Please select Google Gemini in 🔑 Settings."
+                errMsg.contains("3006") || errMsg.contains("too large", ignoreCase = true) ->
+                    "Audio file exceeds Cloudflare Whisper model limit. Please select Google Gemini in 🔑 Settings for full calls."
+                errMsg.contains("1102") || code == 503 ->
+                    "Cloudflare Worker execution limit exceeded on long recording. Please select Google Gemini in 🔑 Settings for full calls."
+                else -> errMsg.take(200)
+            }
         }
     }
 }

@@ -703,6 +703,44 @@ fun CallScribeApp(viewModel: CallViewModel) {
                                 )
                             }
                         }
+                    } else if (selectedEngine == PreferredEngine.CLOUDFLARE) {
+                        Spacer(Modifier.height(6.dp))
+                        Surface(
+                            color = Color(0xFFFEF3C7),
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.5.dp, Color(0xFFF59E0B)),
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                        ) {
+                            Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Info, contentDescription = null, tint = Color(0xFFB45309), modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    text = "☁️ Note: Cloudflare Workers AI Whisper is limited to short MP3/WAV audio. For mobile recordings (.m4a/.amr), calls >1 min, and Bengali/Hindi, 🤖 Google Gemini is recommended (auto-failover active).",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFF92400E),
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+                    } else if (selectedEngine == PreferredEngine.GEMINI) {
+                        Spacer(Modifier.height(6.dp))
+                        Surface(
+                            color = Color(0xFFF0FDF4),
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.5.dp, Color(0xFF16A34A)),
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                        ) {
+                            Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF16A34A), modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    text = "⭐ Recommended: Google Gemini 1.5 Flash natively understands Bengali, Hindi & English, decodes mobile audio (.m4a/.amr), and transcribes full calls with 100% accuracy.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFF14532D),
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
                     } else if (selectedEngine == PreferredEngine.NVIDIA) {
                         Spacer(Modifier.height(6.dp))
                         Surface(

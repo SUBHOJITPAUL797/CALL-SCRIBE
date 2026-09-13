@@ -215,12 +215,8 @@ export default {
           summary = `## 📋 Executive Summary\nNo clear speech or conversation was detected in this recording. The audio appears to contain silence or background noise only.\n\n## 📝 Key Discussion Points\n- None detected\n\n## ✅ Action Items & Commitments\n- None\n\n## 📅 Dates & Deadlines\n- None`;
         }
 
-        // Auto-sanitize if summary detected no coherent conversation or repetition loops:
-        if (summary.includes("No coherent conversation was detected") ||
-            summary.includes("No clear speech or conversation was detected") ||
-            summary.includes("contains only background noise") ||
-            summary.includes("repeated filler words") ||
-            isRepetitionLoop(transcription)) {
+        // Only mark as no audible speech if transcription is genuinely empty or an autoregressive repetition loop:
+        if (isRepetitionLoop(transcription)) {
           transcription = "(No audible speech detected)";
         }
 
@@ -459,9 +455,9 @@ async function runSummarization(env, transcript, callTitle) {
   const systemPrompt = `You are the AI assistant for Call Scribe, a phone call recording and transcription application.
 Analyze the provided phone call transcript accurately.
 CRITICAL LANGUAGE HANDLING:
-- The conversation may be spoken in Bengali (বাংলা), Hindi (हिंदी), English, or a mix of these (Banglish / Hinglish).
+- The conversation is a real phone call between speakers in India. Phone calls may contain background ambient cellular noise, fast casual speech, or regional colloquialisms in Bengali (বাংলা), Hindi (हिंदी), or English.
 - Provide the structured summary, key points, action items, and dates in clear English so the user can easily understand everything that was discussed and agreed upon.
-- If the transcript contains only background noise, repeated filler words, corrupted text, or lacks coherent speech, do not invent facts. State clearly in the Executive Summary that no coherent conversation was detected, and write "- None" for all other sections.
+- Analyze all audible speech to the best of your ability. Extract key discussion points, commitments, and dates from whatever was spoken. Do not dismiss casual or informal telephone conversations. Only if the transcript is completely empty or total non-speech noise should you state in the Executive Summary that no clear speech was detected.
 
 You must output a structured markdown summary in the exact format:
 
