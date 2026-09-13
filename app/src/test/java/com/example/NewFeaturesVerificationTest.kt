@@ -131,4 +131,14 @@ class NewFeaturesVerificationTest {
         assertEquals("4155552671", key1)
         assertEquals("Phone number keys must normalize to last 10 digits", key1, key2)
     }
+
+    @Test
+    fun testNvidiaTranscriptionHelpfulMessage() = kotlinx.coroutines.runBlocking {
+        val repo = com.example.network.NvidiaRepository(apiKeyProvider = { "nvapi-test-key-12345678" })
+        val result = repo.transcribeAudio(ByteArray(100), "recording.mp3", "audio/mp3")
+        assertFalse("Nvidia transcribeAudio should fail gracefully", result.isSuccess)
+        val msg = result.exceptionOrNull()?.message ?: ""
+        assertTrue("Message should clearly direct user to Cloudflare or Gemini", msg.contains("Cloudflare") && msg.contains("Gemini"))
+        assertFalse("Message must never return raw HTTP 404", msg.contains("HTTP 404"))
+    }
 }

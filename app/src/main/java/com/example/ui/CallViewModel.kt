@@ -1241,8 +1241,8 @@ class CallViewModel(
                 transcription = localTrans
                 summary = localSum
             } else {
-                // ── Mode 1: Try Cloudflare Worker First (if preferred or in AUTO mode) ───
-                val tryCloudflareFirst = (currentEngine == PreferredEngine.CLOUDFLARE || currentEngine == PreferredEngine.AUTO) && isCloudflareConfigured()
+                // ── Mode 1: Try Cloudflare Worker First (if preferred, AUTO, or NVIDIA preferred) ───
+                val tryCloudflareFirst = (currentEngine == PreferredEngine.CLOUDFLARE || currentEngine == PreferredEngine.AUTO || currentEngine == PreferredEngine.NVIDIA) && isCloudflareConfigured()
                 if (tryCloudflareFirst && fileSize <= MAX_FILE_SIZE_CLOUDFLARE) {
                     val bytes = readAudioBytes(context, uri, MAX_FILE_SIZE_CLOUDFLARE)
                     if (bytes != null) {
@@ -1262,9 +1262,9 @@ class CallViewModel(
                     }
                 }
 
-                // ── Mode 2: Try Gemini (if preferred, or if Cloudflare wasn't configured / gave no speech in AUTO mode) ─
+                // ── Mode 2: Try Gemini (if preferred, or if Cloudflare wasn't configured / gave no speech in AUTO/NVIDIA mode) ─
                 val cloudflareGaveNoSpeech = isUnusableTranscription(transcription, summary)
-                val tryGemini = (currentEngine == PreferredEngine.GEMINI || (currentEngine == PreferredEngine.AUTO && cloudflareGaveNoSpeech) || transcription.isBlank()) && isApiKeyConfigured()
+                val tryGemini = (currentEngine == PreferredEngine.GEMINI || ((currentEngine == PreferredEngine.AUTO || currentEngine == PreferredEngine.NVIDIA) && cloudflareGaveNoSpeech) || transcription.isBlank()) && isApiKeyConfigured()
                 if (tryGemini && fileSize <= MAX_FILE_SIZE_GEMINI) {
                     val bytes = audioBytes ?: readAudioBytes(context, uri, MAX_FILE_SIZE_GEMINI)
                     audioBytes = null // Release raw byte buffer reference before Base64 encoding & network call
@@ -1314,28 +1314,21 @@ class CallViewModel(
                     }
                 }
 
-                // ── Mode 4: Try NVIDIA Canary ASR if transcription still blank ─────────
-                if (transcription.isBlank() && isNvidiaKeyConfigured() && fileSize <= MAX_FILE_SIZE_NVIDIA) {
-                    val bytes = readAudioBytes(context, uri, MAX_FILE_SIZE_NVIDIA)
-                    if (bytes != null) {
-                        val asrRes = nvidiaRepository?.transcribeAudio(bytes, fileName, resolvedMime)
-                        if (asrRes?.isSuccess == true) {
-                            transcription = asrRes.getOrThrow()
-                        } else {
-                            lastEngineError = asrRes?.exceptionOrNull()
-                        }
-                    }
+                // ── Mode 4: Audio Engine Requirement Check for NVIDIA Preferred Mode ─
+                if (transcription.isBlank() && currentEngine == PreferredEngine.NVIDIA) {
+                    lastEngineError = Exception("Audio transcription requires Cloudflare Worker (Whisper) or Google Gemini. NVIDIA NIM provides Llama 3.1 for Summaries & Chat. Please configure Cloudflare or Gemini in 🔑 Settings.")
                 }
 
-                // ── Mode 5: Summarization fallback if we have a transcript but no summary ───
-                if (transcription.isNotBlank() && summary.isBlank()) {
-                    if (isCloudflareConfigured()) {
-                        val cfSum = cloudflareRepository?.summarizeTranscript(transcription, fileName)
-                        if (cfSum?.isSuccess == true) summary = cfSum.getOrThrow()
-                    }
-                    if (summary.isBlank() && isNvidiaKeyConfigured()) {
+                // ── Mode 5: Summarization fallback / NVIDIA priority ───
+                if (transcription.isNotBlank()) {
+                    // If NVIDIA is preferred or summary is blank, let NVIDIA summarize if available
+                    if ((currentEngine == PreferredEngine.NVIDIA || summary.isBlank()) && isNvidiaKeyConfigured()) {
                         val sumResult = nvidiaRepository?.summarizeTranscript(transcription, fileName)
                         if (sumResult?.isSuccess == true) summary = sumResult.getOrThrow()
+                    }
+                    if (summary.isBlank() && isCloudflareConfigured()) {
+                        val cfSum = cloudflareRepository?.summarizeTranscript(transcription, fileName)
+                        if (cfSum?.isSuccess == true) summary = cfSum.getOrThrow()
                     }
                     if (summary.isBlank()) {
                         val (_, localSum) = LocalAnalysisEngine.analyzeLocally(transcription, fileName)

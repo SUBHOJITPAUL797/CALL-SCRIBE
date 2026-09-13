@@ -885,10 +885,10 @@ fun CallScribeApp(viewModel: CallViewModel) {
                     Spacer(Modifier.height(12.dp))
 
                     // ── NVIDIA Section ───────────────────────────────────────
-                    Text("⚡ NVIDIA API Key (Fallback)", fontWeight = FontWeight.Black, color = Color.Black, style = MaterialTheme.typography.labelLarge)
+                    Text("⚡ NVIDIA API Key (Summaries & Chat)", fontWeight = FontWeight.Black, color = Color.Black, style = MaterialTheme.typography.labelLarge)
                     Spacer(Modifier.height(2.dp))
                     Text(
-                        text = "Used automatically when Gemini hits free quota. Llama 3.1 70B + Canary ASR.",
+                        text = "Powers deep call summaries and Q&A chat with Llama 3.1 70B. Pairs with Cloudflare Whisper or Gemini for audio transcription.",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color.DarkGray
                     )

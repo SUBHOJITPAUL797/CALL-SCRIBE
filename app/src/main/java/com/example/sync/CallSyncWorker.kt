@@ -319,8 +319,8 @@ class CallSyncWorker(
             return Pair(locTrans, locSum)
         }
 
-        // 1. Try Cloudflare Worker first if preferred or in AUTO mode
-        val tryCloudflareFirst = (preferredEngine == PreferredEngine.CLOUDFLARE || preferredEngine == PreferredEngine.AUTO) && cloudflareRepo.isConfigured()
+        // 1. Try Cloudflare Worker first if preferred, AUTO, or NVIDIA preferred
+        val tryCloudflareFirst = (preferredEngine == PreferredEngine.CLOUDFLARE || preferredEngine == PreferredEngine.AUTO || preferredEngine == PreferredEngine.NVIDIA) && cloudflareRepo.isConfigured()
         if (tryCloudflareFirst && fileSize <= maxFileSizeCloudflare) {
             audioBytes = readAudioBytes(context, uri, maxFileSizeCloudflare)
             if (audioBytes != null) {
@@ -333,9 +333,9 @@ class CallSyncWorker(
             }
         }
 
-        // 2. Try Gemini (if preferred, or if Cloudflare wasn't configured / gave no speech in AUTO mode)
+        // 2. Try Gemini (if preferred, or if Cloudflare wasn't configured / gave no speech in AUTO/NVIDIA mode)
         val cloudflareGaveNoSpeech = isUnusableTranscription(transcription, summary)
-        val tryGemini = (preferredEngine == PreferredEngine.GEMINI || (preferredEngine == PreferredEngine.AUTO && cloudflareGaveNoSpeech) || transcription.isBlank()) && geminiRepo.isApiKeyConfigured()
+        val tryGemini = (preferredEngine == PreferredEngine.GEMINI || ((preferredEngine == PreferredEngine.AUTO || preferredEngine == PreferredEngine.NVIDIA) && cloudflareGaveNoSpeech) || transcription.isBlank()) && geminiRepo.isApiKeyConfigured()
         if (tryGemini && fileSize <= maxFileSizeGemini) {
             val bytes = audioBytes ?: readAudioBytes(context, uri, maxFileSizeGemini)
             audioBytes = null // Release raw byte reference before Base64 encoding
@@ -372,26 +372,15 @@ class CallSyncWorker(
             }
         }
 
-        // 4. Try NVIDIA Canary ASR if transcription still blank
-        if (transcription.isBlank() && nvidiaRepo.isApiKeyConfigured() && fileSize <= maxFileSizeNvidia) {
-            val bytes = readAudioBytes(context, uri, maxFileSizeNvidia)
-            if (bytes != null) {
-                val asrRes = nvidiaRepo.transcribeAudio(bytes, fileName, resolvedMime)
-                if (asrRes.isSuccess) {
-                    transcription = asrRes.getOrThrow()
-                }
-            }
-        }
-
-        // 5. Summarization fallback if needed
-        if (transcription.isNotBlank() && summary.isBlank()) {
-            if (cloudflareRepo.isConfigured()) {
-                val cfSum = cloudflareRepo.summarizeTranscript(transcription, fileName)
-                if (cfSum.isSuccess) summary = cfSum.getOrThrow()
-            }
-            if (summary.isBlank() && nvidiaRepo.isApiKeyConfigured()) {
+        // 4. Summarization fallback / NVIDIA priority
+        if (transcription.isNotBlank()) {
+            if ((preferredEngine == PreferredEngine.NVIDIA || summary.isBlank()) && nvidiaRepo.isApiKeyConfigured()) {
                 val sumRes = nvidiaRepo.summarizeTranscript(transcription, fileName)
                 if (sumRes.isSuccess) summary = sumRes.getOrThrow()
+            }
+            if (summary.isBlank() && cloudflareRepo.isConfigured()) {
+                val cfSum = cloudflareRepo.summarizeTranscript(transcription, fileName)
+                if (cfSum.isSuccess) summary = cfSum.getOrThrow()
             }
             if (summary.isBlank()) {
                 val (_, locSum) = LocalAnalysisEngine.analyzeLocally(transcription, fileName)

@@ -43,50 +43,18 @@ class NvidiaRepository(
 
     /**
      * Transcribe audio bytes.
-     * If self-hosted NIM or NVCF endpoint is available, use it.
-     * Otherwise return failure so caller can fall through to alternative engines.
+     * Note: integrate.api.nvidia.com serves LLMs (Llama 3.1 70B, Nemotron) for text/vision completions,
+     * but does not provide a public serverless audio/transcriptions ASR endpoint.
+     * Return an informative error so callers and users clearly understand what to configure.
      */
     suspend fun transcribeAudio(
         audioBytes: ByteArray,
         fileName: String,
         mimeType: String
     ): Result<String> = withContext(Dispatchers.IO) {
-        val apiKey = apiKeyProvider().trim()
-        if (!isApiKeyConfigured()) {
-            return@withContext Result.failure(Exception("NVIDIA API key not configured."))
-        }
-
-        try {
-            // Try NVIDIA ASR endpoint
-            val safeFileName = fileName.filter { it.code in 32..126 }.ifBlank { "recording.mp3" }
-            val mediaType = mimeType.toMediaTypeOrNull() ?: "audio/mp3".toMediaTypeOrNull()
-            val fileBody = audioBytes.toRequestBody(mediaType)
-
-            val requestBody = okhttp3.MultipartBody.Builder()
-                .setType(okhttp3.MultipartBody.FORM)
-                .addFormDataPart("model", "nvidia/canary-1b")
-                .addFormDataPart("file", safeFileName, fileBody)
-                .build()
-
-            val request = Request.Builder()
-                .url("$BASE_URL/audio/transcriptions")
-                .addHeader("Authorization", "Bearer ${apiKey.trim()}")
-                .post(requestBody)
-                .build()
-
-            client.newCall(request).execute().use { response ->
-                val body = response.body?.string()
-                if (response.isSuccessful) {
-                    val json = JSONObject(body ?: "{}")
-                    val text = json.optString("text", "").trim()
-                    if (text.isNotBlank()) return@withContext Result.success(text)
-                }
-                Result.failure(Exception("NVIDIA cloud transcription unavailable (HTTP ${response.code})."))
-            }
-        } catch (e: Throwable) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-            Result.failure(Exception("NVIDIA transcription: ${e.localizedMessage}", e))
-        }
+        Result.failure(
+            Exception("NVIDIA NIM provides Llama 3.1 for Summaries & Chat, but does not provide cloud audio transcription. Please configure Cloudflare Worker (Whisper) or Google Gemini in 🔑 Settings to transcribe audio.")
+        )
     }
 
     /** Summarize an existing transcript text using NVIDIA Nemotron/Llama 70B */
