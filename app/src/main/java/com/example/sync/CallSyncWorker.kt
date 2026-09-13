@@ -36,31 +36,33 @@ class CallSyncWorker(
 ) : CoroutineWorker(appContext, workerParams) {
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
-        SyncLock.mutex.withLock {
-            val prefs = DefaultAppContainer.getPreferencesManager(appContext)
+        val prefs = DefaultAppContainer.getPreferencesManager(appContext)
 
-            // Check if background auto-sync is enabled
-            if (!prefs.isAutoSyncEnabled()) {
-                return@withLock Result.success()
-            }
+        // Check if background auto-sync is enabled
+        if (!prefs.isAutoSyncEnabled()) {
+            return@withContext Result.success()
+        }
 
-            val folderUriStr = prefs.getPersistedFolderUri() ?: return@withLock Result.success()
-            val treeUri = try {
-                Uri.parse(folderUriStr)
-            } catch (_: Exception) {
-                return@withLock Result.success()
-            }
+        val folderUriStr = prefs.getPersistedFolderUri() ?: return@withContext Result.success()
+        val treeUri = try {
+            Uri.parse(folderUriStr)
+        } catch (_: Exception) {
+            return@withContext Result.success()
+        }
 
-            val repository = DefaultAppContainer.getRepository(appContext)
-            val geminiRepo = DefaultAppContainer.getGeminiRepository(appContext)
-            val nvidiaRepo = DefaultAppContainer.getNvidiaRepository(appContext)
-            val cloudflareRepo = DefaultAppContainer.getCloudflareWorkerRepository(appContext)
-            val preferredEngine = prefs.getPreferredEngine()
-            val mode = prefs.getAutoAnalyzeMode()
-            val targets = prefs.getAutoAnalyzeTargets()
-            val commitmentRemindersEnabled = prefs.isCommitmentRemindersEnabled()
+        val repository = DefaultAppContainer.getRepository(appContext)
+        val geminiRepo = DefaultAppContainer.getGeminiRepository(appContext)
+        val nvidiaRepo = DefaultAppContainer.getNvidiaRepository(appContext)
+        val cloudflareRepo = DefaultAppContainer.getCloudflareWorkerRepository(appContext)
+        val preferredEngine = prefs.getPreferredEngine()
+        val mode = prefs.getAutoAnalyzeMode()
+        val targets = prefs.getAutoAnalyzeTargets()
+        val commitmentRemindersEnabled = prefs.isCommitmentRemindersEnabled()
 
-            try {
+        val filesToProcess = mutableListOf<Triple<AudioFileInfo, Int, Boolean>>()
+
+        try {
+            SyncLock.mutex.withLock {
                 val audioFiles = mutableListOf<AudioFileInfo>()
                 val treeDocId = try {
                     DocumentsContract.getTreeDocumentId(treeUri)
@@ -71,11 +73,11 @@ class CallSyncWorker(
                 scanDirectoryRecursively(appContext, treeUri, treeDocId, audioFiles, currentDepth = 0, maxDepth = 3)
 
                 if (audioFiles.isEmpty()) {
-                    return@withLock Result.success()
+                    return@withLock
                 }
 
                 // Process newest files first
-                audioFiles.sortByDescending { it.lastModified }
+                audioFiles.sortByDescending { it.effectiveTimestamp }
 
                 for (fileInfo in audioFiles) {
                     if (isStopped || !coroutineContext.isActive) break
@@ -101,7 +103,7 @@ class CallSyncWorker(
                             title = fileInfo.name,
                             contentEncrypted = SimpleEncryption.encrypt(""),
                             summaryEncrypted = SimpleEncryption.encrypt("Pending AI Analysis\n\nTap ⚡ Transcribe & Analyze Call to view insights."),
-                            timestamp = if (fileInfo.lastModified > 0) fileInfo.lastModified else System.currentTimeMillis(),
+                            timestamp = fileInfo.effectiveTimestamp,
                             sourceUri = fileUriStr,
                             durationMs = duration
                         )
@@ -110,90 +112,97 @@ class CallSyncWorker(
 
                     // 2. Check if this call matches the user's Auto-Analyze rule
                     val shouldAutoAnalyze = CallMetadataParser.matchesAutoAnalyzeRule(fileInfo.name, mode, targets)
-
                     val hasAnyEngine = geminiRepo.isApiKeyConfigured() || nvidiaRepo.isApiKeyConfigured() || cloudflareRepo.isConfigured() || preferredEngine == PreferredEngine.ON_DEVICE
 
-                    if (shouldAutoAnalyze && hasAnyEngine) {
-                        val spokenLanguage = prefs.getSpokenLanguage().code
-                        // Perform background audio analysis
-                        val analysisResult = processAudio(
-                            context = appContext,
-                            uri = fileInfo.uri,
-                            fileName = fileInfo.name,
-                            mimeType = fileInfo.mimeType,
-                            fileSize = fileInfo.size,
-                            geminiRepo = geminiRepo,
-                            nvidiaRepo = nvidiaRepo,
-                            cloudflareRepo = cloudflareRepo,
-                            preferredEngine = preferredEngine,
-                            spokenLanguage = spokenLanguage
-                        )
+                    filesToProcess.add(Triple(fileInfo, insertedId, shouldAutoAnalyze && hasAnyEngine))
+                }
+            } // Mutex ends immediately after scanning & placeholder creation!
+        } catch (_: SecurityException) {
+            // Folder permission was revoked; do not retry indefinitely
+            return@withContext Result.failure()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // Cooperative WorkManager cancellation - do NOT swallow or retry
+            throw e
+        } catch (t: Throwable) {
+            return@withContext Result.retry()
+        }
 
-                        val finalTranscription = analysisResult.first
-                        val finalSummary = analysisResult.second
-                        val duration = AudioDurationHelper.getDurationMs(appContext, fileInfo.uri).let {
-                            if (it > 0) it else (existing?.durationMs ?: 0)
-                        }
+        // Process audio files OUTSIDE the lock, strictly newest first!
+        for ((fileInfo, insertedId, shouldAutoAnalyze) in filesToProcess) {
+            if (isStopped || !coroutineContext.isActive) break
 
-                        val updatedRecording = Recording(
-                            id = insertedId,
-                            title = fileInfo.name,
-                            contentEncrypted = SimpleEncryption.encrypt(finalTranscription),
-                            summaryEncrypted = SimpleEncryption.encrypt(finalSummary),
-                            timestamp = if (fileInfo.lastModified > 0) fileInfo.lastModified else System.currentTimeMillis(),
-                            sourceUri = fileUriStr,
-                            durationMs = duration
-                        )
-                        repository.insert(updatedRecording)
+            if (shouldAutoAnalyze) {
+                val spokenLanguage = prefs.getSpokenLanguage().code
+                // Perform background audio analysis
+                val analysisResult = processAudio(
+                    context = appContext,
+                    uri = fileInfo.uri,
+                    fileName = fileInfo.name,
+                    mimeType = fileInfo.mimeType,
+                    fileSize = fileInfo.size,
+                    geminiRepo = geminiRepo,
+                    nvidiaRepo = nvidiaRepo,
+                    cloudflareRepo = cloudflareRepo,
+                    preferredEngine = preferredEngine,
+                    spokenLanguage = spokenLanguage
+                )
 
-                        // 3. Commitments & Important Dates Detection
-                        if (commitmentRemindersEnabled) {
-                            val actionItems = CommitmentExtractor.extractActionItems(finalSummary)
-                            val dates = CommitmentExtractor.extractDates(finalSummary)
+                val finalTranscription = analysisResult.first
+                val finalSummary = analysisResult.second
+                val existing = repository.getById(insertedId)
+                val duration = AudioDurationHelper.getDurationMs(appContext, fileInfo.uri).let {
+                    if (it > 0) it else (existing?.durationMs ?: 0)
+                }
 
-                            if (actionItems.isNotEmpty() || dates.isNotEmpty()) {
-                                NotificationHelper.notifyCommitments(
-                                    context = appContext,
-                                    callTitle = fileInfo.name,
-                                    actionItems = actionItems,
-                                    dates = dates,
-                                    recordingId = insertedId
-                                )
-                            }
-                        }
+                val updatedRecording = Recording(
+                    id = insertedId,
+                    title = fileInfo.name,
+                    contentEncrypted = SimpleEncryption.encrypt(finalTranscription),
+                    summaryEncrypted = SimpleEncryption.encrypt(finalSummary),
+                    timestamp = fileInfo.effectiveTimestamp,
+                    sourceUri = fileInfo.uri.toString(),
+                    durationMs = duration
+                )
+                repository.insert(updatedRecording)
 
-                        // Notification: Auto-analyzed call ready
-                        NotificationHelper.notifyNewCallDetected(
-                            context = appContext,
-                            callTitle = fileInfo.name,
-                            recordingId = insertedId,
-                            isAutoAnalyzed = true
-                        )
+                // 3. Commitments & Important Dates Detection
+                if (commitmentRemindersEnabled) {
+                    val actionItems = CommitmentExtractor.extractActionItems(finalSummary)
+                    val dates = CommitmentExtractor.extractDates(finalSummary)
 
-                        // Brief delay to be polite to API rate limits
-                        kotlinx.coroutines.delay(3000)
-                    } else {
-                        // Not auto-analyzed: notify new call detected for manual analysis
-                        NotificationHelper.notifyNewCallDetected(
+                    if (actionItems.isNotEmpty() || dates.isNotEmpty()) {
+                        NotificationHelper.notifyCommitments(
                             context = appContext,
                             callTitle = fileInfo.name,
-                            recordingId = insertedId,
-                            isAutoAnalyzed = false
+                            actionItems = actionItems,
+                            dates = dates,
+                            recordingId = insertedId
                         )
                     }
                 }
 
-                Result.success()
-            } catch (_: SecurityException) {
-                // Folder permission was revoked; do not retry indefinitely
-                Result.failure()
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                // Cooperative WorkManager cancellation - do NOT swallow or retry
-                throw e
-            } catch (t: Throwable) {
-                Result.retry()
+                // Notification: Auto-analyzed call ready
+                NotificationHelper.notifyNewCallDetected(
+                    context = appContext,
+                    callTitle = fileInfo.name,
+                    recordingId = insertedId,
+                    isAutoAnalyzed = true
+                )
+
+                // Brief delay to be polite to API rate limits
+                kotlinx.coroutines.delay(3000)
+            } else {
+                // Not auto-analyzed: notify new call detected for manual analysis
+                NotificationHelper.notifyNewCallDetected(
+                    context = appContext,
+                    callTitle = fileInfo.name,
+                    recordingId = insertedId,
+                    isAutoAnalyzed = false
+                )
             }
         }
+
+        Result.success()
     }
 
     private data class AudioFileInfo(
@@ -201,7 +210,8 @@ class CallSyncWorker(
         val name: String,
         val mimeType: String?,
         val size: Long,
-        val lastModified: Long
+        val lastModified: Long,
+        val effectiveTimestamp: Long = CallMetadataParser.extractCallTimestamp(name, lastModified)
     )
 
     private fun isAudioFile(name: String, mime: String?): Boolean {

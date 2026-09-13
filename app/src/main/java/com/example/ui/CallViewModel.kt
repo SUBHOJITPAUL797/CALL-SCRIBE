@@ -128,6 +128,7 @@ class CallViewModel(
                     }
                     if (duration > 0) {
                         newDurations[rec.id] = duration
+                        repository.updateDuration(rec.id, duration)
                     }
                 }
             }
@@ -616,8 +617,38 @@ class CallViewModel(
         }
     }
 
+    private var hasRepairedTimestamps = false
+
+    private fun repairTimestampsIfNecessary(recs: List<Recording>) {
+        if (hasRepairedTimestamps) return
+        hasRepairedTimestamps = true
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                var repairedCount = 0
+                for (rec in recs) {
+                    val parsed = CallMetadataParser.extractCallTimestamp(rec.title, rec.timestamp)
+                    if (Math.abs(parsed - rec.timestamp) > 60_000L) {
+                        repository.updateTimestamp(rec.id, parsed)
+                        repairedCount++
+                    }
+                }
+                if (repairedCount > 0) {
+                    android.util.Log.i("CallScribe", "Repaired $repairedCount recording timestamps in Room to match call date from filename")
+                }
+            } catch (e: Throwable) {
+                android.util.Log.w("CallScribe", "Timestamp repair non-fatal error: ${e.localizedMessage}")
+            }
+        }
+    }
+
     val recordings = combine(repository.allRecordings, searchQuery) { list, query ->
         val distinctList = list.distinctBy { it.sourceUri ?: it.id.toString() }
+            .sortedByDescending { it.timestamp }
+
+        if (!hasRepairedTimestamps && distinctList.isNotEmpty()) {
+            repairTimestampsIfNecessary(distinctList)
+        }
+
         val trimmedQuery = query.trim()
         if (trimmedQuery.isBlank()) {
             distinctList
@@ -720,7 +751,7 @@ class CallViewModel(
                         return@withContext
                     }
 
-                    audioFiles.sortByDescending { it.lastModified }
+                    audioFiles.sortByDescending { it.effectiveTimestamp }
 
                     // Count how many actually need analysis vs already analyzed
                     var pendingCount = 0
@@ -751,6 +782,9 @@ class CallViewModel(
         val appContext = context.applicationContext
 
         viewModelScope.launch(Dispatchers.IO) {
+            val toAutoAnalyze = mutableListOf<Pair<AudioFileInfo, Int>>()
+            var newDetected = 0
+
             SyncLock.mutex.withLock {
                 try {
                     val audioFiles = mutableListOf<AudioFileInfo>()
@@ -761,8 +795,8 @@ class CallViewModel(
                     }
 
                     scanDirectoryRecursively(appContext, treeUri, treeDocId, audioFiles, currentDepth = 0, maxDepth = 3)
+                    audioFiles.sortByDescending { it.effectiveTimestamp }
 
-                    var newDetected = 0
                     for (file in audioFiles) {
                         if (file.size <= 0L) continue
 
@@ -774,7 +808,7 @@ class CallViewModel(
                                 title = file.name,
                                 contentEncrypted = SimpleEncryption.encrypt(""),
                                 summaryEncrypted = SimpleEncryption.encrypt("Pending AI Analysis\n\nTap ⚡ Transcribe & Analyze Call to view insights."),
-                                timestamp = if (file.lastModified > 0) file.lastModified else System.currentTimeMillis(),
+                                timestamp = file.effectiveTimestamp,
                                 sourceUri = file.uri.toString(),
                                 durationMs = duration
                             )
@@ -787,30 +821,40 @@ class CallViewModel(
 
                             val canAnalyze = isCloudflareConfigured() || isApiKeyConfigured() || isNvidiaKeyConfigured() || (preferredEngine.value == PreferredEngine.ON_DEVICE)
                             if (shouldAuto && canAnalyze) {
-                                processAudioFile(
-                                    context = appContext,
-                                    uri = file.uri,
-                                    fileName = file.name,
-                                    mimeType = file.mimeType,
-                                    fileSize = file.size,
-                                    existingId = insertedId
-                                )
-                                val updatedRec = repository.getById(insertedId)
-                                if (updatedRec != null && preferencesManager?.isCommitmentRemindersEnabled() == true) {
-                                    val actions = CommitmentExtractor.extractActionItems(updatedRec.decodedSummary)
-                                    val dates = CommitmentExtractor.extractDates(updatedRec.decodedSummary)
-                                    NotificationHelper.notifyCommitments(appContext, file.name, actions, dates, insertedId)
-                                }
-                                NotificationHelper.notifyNewCallDetected(appContext, file.name, insertedId, isAutoAnalyzed = true)
+                                toAutoAnalyze.add(Pair(file, insertedId))
                             }
                         }
                     }
+                } catch (_: Exception) {
+                }
+            } // Mutex ends immediately after fast scan & placeholder insertion!
 
-                    if (newDetected > 0) {
-                        withContext(Dispatchers.Main) {
-                            updateStatusMessage.value = "Detected $newDetected new call recording(s)!"
-                        }
+            if (newDetected > 0) {
+                withContext(Dispatchers.Main) {
+                    updateStatusMessage.value = "Detected $newDetected new call recording(s)!"
+                }
+            }
+
+            // Run auto-analysis outside the mutex lock, strictly newest first!
+            for ((file, insertedId) in toAutoAnalyze) {
+                if (!isActive) break
+                try {
+                    processAudioFile(
+                        context = appContext,
+                        uri = file.uri,
+                        fileName = file.name,
+                        mimeType = file.mimeType,
+                        fileSize = file.size,
+                        existingId = insertedId,
+                        fileLastModified = file.effectiveTimestamp
+                    )
+                    val updatedRec = repository.getById(insertedId)
+                    if (updatedRec != null && preferencesManager?.isCommitmentRemindersEnabled() == true) {
+                        val actions = CommitmentExtractor.extractActionItems(updatedRec.decodedSummary)
+                        val dates = CommitmentExtractor.extractDates(updatedRec.decodedSummary)
+                        NotificationHelper.notifyCommitments(appContext, file.name, actions, dates, insertedId)
                     }
+                    NotificationHelper.notifyNewCallDetected(appContext, file.name, insertedId, isAutoAnalyzed = true)
                 } catch (_: Exception) {
                 }
             }
@@ -839,7 +883,7 @@ class CallViewModel(
                     syncProcessedCount.value = 0
                     syncErrorCount.value = 0
 
-                    withContext(Dispatchers.IO) {
+                    val (targetFiles, alreadyAnalyzedCount) = withContext(Dispatchers.IO) {
                         SyncLock.mutex.withLock {
                             try {
                                 val audioFiles = mutableListOf<AudioFileInfo>()
@@ -853,14 +897,14 @@ class CallViewModel(
 
                                 if (audioFiles.isEmpty()) {
                                     syncStatus.value = "No audio recordings found."
-                                    return@withLock
+                                    return@withLock Pair(emptyList<AudioFileInfo>(), 0)
                                 }
 
-                                audioFiles.sortByDescending { it.lastModified }
+                                audioFiles.sortByDescending { it.effectiveTimestamp }
 
                                 // Strictly partition into files needing analysis vs already analyzed
                                 val filesNeedingAnalysis = mutableListOf<AudioFileInfo>()
-                                var alreadyAnalyzedCount = 0
+                                var alreadyAnalyzed = 0
 
                                 for (file in audioFiles) {
                                     if (file.size <= 0L) continue
@@ -869,94 +913,122 @@ class CallViewModel(
                                     val hasRealTranscript = existing != null && hasValidTranscript(existing.decodedTranscription)
 
                                     if (hasRealTranscript) {
-                                        alreadyAnalyzedCount++
+                                        alreadyAnalyzed++
                                     } else {
                                         filesNeedingAnalysis.add(file)
                                     }
                                 }
 
-                                // If all files in folder are already analyzed, exit immediately with zero API calls & zero duplicates
                                 if (filesNeedingAnalysis.isEmpty()) {
                                     syncStatus.value = "All ${audioFiles.size} recordings are already analyzed & up to date! (0 duplicates)"
-                                    return@withLock
+                                    return@withLock Pair(emptyList<AudioFileInfo>(), alreadyAnalyzed)
                                 }
 
-                                // Apply limit strictly to the unanalyzed/pending files
-                                val targetFiles = if (limit > 0 && limit < filesNeedingAnalysis.size) {
+                                filesNeedingAnalysis.sortByDescending { it.effectiveTimestamp }
+
+                                val selected = if (limit > 0 && limit < filesNeedingAnalysis.size) {
                                     filesNeedingAnalysis.take(limit)
                                 } else {
                                     filesNeedingAnalysis
                                 }
 
-                                syncTotalCount.value = targetFiles.size
-                                syncStatus.value = "Analyzing ${targetFiles.size} new calls ($alreadyAnalyzedCount already analyzed & excluded)..."
-
-                                var processedCount = 0
-                                var errorCount = 0
-
-                                for ((index, fileInfo) in targetFiles.withIndex()) {
-                                    if (!isActive) break
-
-                                    val rawProg = if (targetFiles.isNotEmpty()) (index.toFloat() / targetFiles.size.toFloat()) else 0f
-                                    syncProgress.value = if (rawProg.isNaN() || rawProg.isInfinite()) 0f else rawProg.coerceIn(0f, 1f)
-
-                                    val existing = try { repository.getByUri(fileInfo.uri.toString()) } catch (_: Throwable) { null }
-                                    val actionLabel = if (existing == null) "Analyzing" else "Re-analyzing"
-                                    syncStatus.value = "$actionLabel (${index + 1}/${targetFiles.size}): ${fileInfo.name}"
-
-                                    val processResult = try {
-                                        processAudioFile(
-                                            appContext,
-                                            fileInfo.uri,
-                                            fileInfo.name,
-                                            fileInfo.mimeType,
-                                            fileInfo.size,
-                                            existingId = existing?.id,
-                                            fileLastModified = fileInfo.lastModified
+                                // Ensure placeholders exist for UI display
+                                for (file in selected) {
+                                    val existing = try { repository.getByUri(file.uri.toString()) } catch (_: Throwable) { null }
+                                    if (existing == null) {
+                                        val duration = AudioDurationHelper.getDurationMs(appContext, file.uri)
+                                        val placeholder = Recording(
+                                            id = 0,
+                                            title = file.name,
+                                            contentEncrypted = SimpleEncryption.encrypt(""),
+                                            summaryEncrypted = SimpleEncryption.encrypt("Pending AI Analysis\n\nTap ⚡ Transcribe & Analyze Call to view insights."),
+                                            timestamp = file.effectiveTimestamp,
+                                            sourceUri = file.uri.toString(),
+                                            durationMs = duration
                                         )
-                                    } catch (e: Throwable) {
-                                        Result.failure(e)
-                                    }
-
-                                    if (processResult.isSuccess) {
-                                        processedCount++
-                                        syncProcessedCount.value = processedCount
-                                        // Pacing delay between calls to stay comfortably within Google's 15 RPM free tier limit
-                                        if (index < targetFiles.size - 1 && isApiKeyConfigured()) {
-                                            kotlinx.coroutines.delay(4000)
-                                        }
-                                    } else {
-                                        errorCount++
-                                        syncErrorCount.value = errorCount
-                                        val err = processResult.exceptionOrNull()
-                                        if (err is ApiQuotaExceededException || err?.message?.contains("429") == true) {
-                                            syncStatus.value = "⏳ Gemini rate limit (15/min) reached. Pausing 15s to reset quota..."
-                                            kotlinx.coroutines.delay(15000)
-                                        } else {
-                                            val errorMsg = err?.localizedMessage ?: "Processing error"
-                                            syncStatus.value = "Note on ${fileInfo.name}: $errorMsg"
-                                            kotlinx.coroutines.delay(800)
-                                        }
+                                        repository.insert(placeholder)
                                     }
                                 }
 
-                                syncProgress.value = 1f
-                                val summaryMessage = when {
-                                    errorCount > 0 && processedCount == 0 -> "Finished with $errorCount note(s). Excluded $alreadyAnalyzedCount already analyzed."
-                                    errorCount > 0 -> "Analyzed $processedCount new call(s) ($alreadyAnalyzedCount already analyzed & excluded, 0 duplicates)."
-                                    processedCount > 0 -> "Sync complete! Analyzed $processedCount call(s) ($alreadyAnalyzedCount excluded, 0 duplicates)."
-                                    else -> "All recordings are up to date ($alreadyAnalyzedCount excluded, 0 duplicates)."
-                                }
-                                syncStatus.value = summaryMessage
-
+                                Pair(selected, alreadyAnalyzed)
                             } catch (t: Throwable) {
                                 if (t !is kotlinx.coroutines.CancellationException) {
-                                    android.util.Log.e("CallScribe", "Sync failed inside lock: ${t.localizedMessage}", t)
-                                    syncStatus.value = "Sync failed: ${t.localizedMessage ?: t.javaClass.simpleName}"
+                                    android.util.Log.e("CallScribe", "Sync folder scan failed: ${t.localizedMessage}", t)
+                                    syncStatus.value = "Scan failed: ${t.localizedMessage ?: t.javaClass.simpleName}"
                                 }
+                                Pair(emptyList<AudioFileInfo>(), 0)
                             }
                         } // end mutex withLock
                     }
+
+                    if (targetFiles.isEmpty()) {
+                        isSyncing.value = false
+                        return@launch
+                    }
+
+                    syncTotalCount.value = targetFiles.size
+                    syncStatus.value = "Analyzing ${targetFiles.size} new calls ($alreadyAnalyzedCount already analyzed & excluded)..."
+
+                    var processedCount = 0
+                    var errorCount = 0
+
+                    withContext(Dispatchers.IO) {
+                        for ((index, fileInfo) in targetFiles.withIndex()) {
+                            if (!isActive) break
+
+                            val rawProg = if (targetFiles.isNotEmpty()) (index.toFloat() / targetFiles.size.toFloat()) else 0f
+                            syncProgress.value = if (rawProg.isNaN() || rawProg.isInfinite()) 0f else rawProg.coerceIn(0f, 1f)
+
+                            val existing = try { repository.getByUri(fileInfo.uri.toString()) } catch (_: Throwable) { null }
+                            val actionLabel = if (existing == null || existing.decodedTranscription.isBlank()) "Analyzing" else "Re-analyzing"
+                            syncStatus.value = "$actionLabel (${index + 1}/${targetFiles.size}): ${fileInfo.name}"
+
+                            val processResult = try {
+                                processAudioFile(
+                                    appContext,
+                                    fileInfo.uri,
+                                    fileInfo.name,
+                                    fileInfo.mimeType,
+                                    fileInfo.size,
+                                    existingId = existing?.id,
+                                    fileLastModified = fileInfo.effectiveTimestamp
+                                )
+                            } catch (e: Throwable) {
+                                Result.failure(e)
+                            }
+
+                            if (processResult.isSuccess) {
+                                processedCount++
+                                syncProcessedCount.value = processedCount
+                                // Pacing delay between calls to stay comfortably within Google's 15 RPM free tier limit
+                                if (index < targetFiles.size - 1 && isApiKeyConfigured()) {
+                                    kotlinx.coroutines.delay(4000)
+                                }
+                            } else {
+                                errorCount++
+                                syncErrorCount.value = errorCount
+                                val err = processResult.exceptionOrNull()
+                                if (err is ApiQuotaExceededException || err?.message?.contains("429") == true) {
+                                    syncStatus.value = "⏳ Gemini rate limit (15/min) reached. Pausing 15s to reset quota..."
+                                    kotlinx.coroutines.delay(15000)
+                                } else {
+                                    val errorMsg = err?.localizedMessage ?: "Processing error"
+                                    syncStatus.value = "Note on ${fileInfo.name}: $errorMsg"
+                                    kotlinx.coroutines.delay(800)
+                                }
+                            }
+                        }
+                    }
+
+                    syncProgress.value = 1f
+                    val summaryMessage = when {
+                        errorCount > 0 && processedCount == 0 -> "Finished with $errorCount note(s). Excluded $alreadyAnalyzedCount already analyzed."
+                        errorCount > 0 -> "Analyzed $processedCount new call(s) ($alreadyAnalyzedCount already analyzed & excluded, 0 duplicates)."
+                        processedCount > 0 -> "Sync complete! Analyzed $processedCount call(s) ($alreadyAnalyzedCount excluded, 0 duplicates)."
+                        else -> "All recordings are up to date ($alreadyAnalyzedCount excluded, 0 duplicates)."
+                    }
+                    syncStatus.value = summaryMessage
+
                 } catch (t: Throwable) {
                     if (t !is kotlinx.coroutines.CancellationException) {
                         android.util.Log.e("CallScribe", "Sync failed in launch: ${t.localizedMessage}", t)
@@ -982,7 +1054,8 @@ class CallViewModel(
         val name: String,
         val mimeType: String?,
         val size: Long,
-        val lastModified: Long
+        val lastModified: Long,
+        val effectiveTimestamp: Long = CallMetadataParser.extractCallTimestamp(name, lastModified)
     )
 
     private fun isAudioFile(name: String, mime: String?): Boolean {
@@ -1289,7 +1362,8 @@ class CallViewModel(
 
             val existingRec = existingId?.let { withContext(Dispatchers.IO) { repository.getById(it) } }
             val existingTimestamp = existingRec?.timestamp
-            val finalTimestamp = if (fileLastModified > 0) fileLastModified else (existingTimestamp ?: System.currentTimeMillis())
+            val rawTimestamp = if (fileLastModified > 0) fileLastModified else (existingTimestamp ?: System.currentTimeMillis())
+            val finalTimestamp = CallMetadataParser.extractCallTimestamp(fileName, rawTimestamp)
             val duration = AudioDurationHelper.getDurationMs(context, uri).let { if (it > 0) it else (existingRec?.durationMs ?: 0) }
 
             val recording = Recording(
@@ -1346,35 +1420,33 @@ class CallViewModel(
 
                 try {
                     val result = withContext(Dispatchers.IO) {
-                        SyncLock.mutex.withLock {
-                            try {
-                                val uri = Uri.parse(uriStr)
-                                val fileSize = try {
-                                    appContext.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: 0L
-                                } catch (e: Throwable) {
-                                    android.util.Log.w("CallScribe", "openFileDescriptor statSize failed: ${e.localizedMessage}")
-                                    0L
-                                }
-                                val mime = try {
-                                    appContext.contentResolver.getType(uri) ?: "audio/mp3"
-                                } catch (e: Throwable) {
-                                    android.util.Log.w("CallScribe", "contentResolver.getType failed: ${e.localizedMessage}")
-                                    "audio/mp3"
-                                }
-
-                                processAudioFile(
-                                    context = appContext,
-                                    uri = uri,
-                                    fileName = recording.title,
-                                    mimeType = mime,
-                                    fileSize = fileSize,
-                                    existingId = recording.id,
-                                    fileLastModified = recording.timestamp
-                                )
+                        try {
+                            val uri = Uri.parse(uriStr)
+                            val fileSize = try {
+                                appContext.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: 0L
                             } catch (e: Throwable) {
-                                android.util.Log.e("CallScribe", "processAudioFile failed in mutex: ${e.localizedMessage}", e)
-                                Result.failure(e)
+                                android.util.Log.w("CallScribe", "openFileDescriptor statSize failed: ${e.localizedMessage}")
+                                0L
                             }
+                            val mime = try {
+                                appContext.contentResolver.getType(uri) ?: "audio/mp3"
+                            } catch (e: Throwable) {
+                                android.util.Log.w("CallScribe", "contentResolver.getType failed: ${e.localizedMessage}")
+                                "audio/mp3"
+                            }
+
+                            processAudioFile(
+                                context = appContext,
+                                uri = uri,
+                                fileName = recording.title,
+                                mimeType = mime,
+                                fileSize = fileSize,
+                                existingId = recording.id,
+                                fileLastModified = recording.timestamp
+                            )
+                        } catch (e: Throwable) {
+                            android.util.Log.e("CallScribe", "processAudioFile failed: ${e.localizedMessage}", e)
+                            Result.failure(e)
                         }
                     }
 

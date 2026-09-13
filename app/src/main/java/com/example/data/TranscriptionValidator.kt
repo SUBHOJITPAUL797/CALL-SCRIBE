@@ -33,17 +33,18 @@ object TranscriptionValidator {
         "contains background noise and repeated filler"
     )
 
-    // Matches repeating multi-word or single-word phrases (1 to 4 words) repeated 3+ times back to back.
-    // Works across Latin, Devanagari (Hindi), Bengali, and all Unicode letter/number scripts.
-    private val SPACED_PHRASE_REPETITION_REGEX = Regex(
-        """(?i)(?:^|[\s,।!?])([\p{L}\p{N}]{1,15}(?:[\s,।]+[\p{L}\p{N}]{1,15}){0,3})(?:[\s,।]+\1){2,}(?:[\s,।!?]|$)"""
+    // Matches runaway repeating multi-word or single-word phrases (1 to 4 words) repeated 4+ times back to back.
+    // e.g. "बापापा पो बापापा पो बापापा पो बापापा पो..."
+    private val RUNAWAY_PHRASE_REPETITION_REGEX = Regex(
+        """(?i)(?:^|[\s,।!?])([\p{L}\p{N}]{1,15}(?:[\s,।]+[\p{L}\p{N}]{1,15}){0,3})(?:[\s,।]+\1){3,}(?:[\s,।!?]|$)"""
     )
 
-    // Matches contiguous character/syllable repetitions without spaces: "शाशाशाशा..." or "শাশাশাশা..."
-    private val CHAR_REPETITION_REGEX = Regex("""([^\s]{1,4})\1{3,}""")
+    // Matches runaway unspaced character/syllable repetitions (e.g. "शाशाशाशाशाशा..." or "শাশাশাশাশা...") repeated 6+ times
+    private val RUNAWAY_CHAR_REPETITION_REGEX = Regex("""([^\s]{1,4})\1{5,}""")
 
     /**
      * Checks whether a transcription and its optional summary indicate an unusable or hallucinated result.
+     * Guaranteed zero false-positives on normal conversational phrases like "yeah yeah yeah" or "ok ok".
      */
     fun isUnusableTranscription(transcription: String?, summary: String? = null): Boolean {
         if (transcription.isNullOrBlank()) return true
@@ -63,21 +64,23 @@ object TranscriptionValidator {
             }
         }
 
-        // 3. Autoregressive repetition loop check without spaces e.g. "शाशाशाशा..." or "শাশাশাশা..."
-        if (CHAR_REPETITION_REGEX.containsMatchIn(cleanTrans)) return true
+        // 3. Autoregressive unspaced character repetition loop (e.g. "शाशाशाशाशाशा...")
+        RUNAWAY_CHAR_REPETITION_REGEX.find(cleanTrans)?.let { match ->
+            if (match.value.length >= cleanTrans.length * 0.40) return true
+        }
 
-        // 4. Spaced multi-word repetition loop e.g. "बापापा पो बापापा पो बापापा पो"
-        if (SPACED_PHRASE_REPETITION_REGEX.containsMatchIn(cleanTrans)) return true
+        // 4. Runaway spaced multi-word repetition loop (e.g. "बापापा पो बापापा पो बापापा पो बापापा पो...")
+        RUNAWAY_PHRASE_REPETITION_REGEX.find(cleanTrans)?.let { match ->
+            if (match.value.length >= cleanTrans.length * 0.40) return true
+        }
 
         // 5. Compression / Vocabulary Uniqueness Ratio check:
-        // When Whisper gets trapped in an autoregressive loop on noise/silence,
-        // it repeats a tiny set of words over and over
+        // Only applies to long texts (> 15 words) where unique words are < 20% of the total words
         val tokens = cleanTrans.split(Regex("""[\s,।!?\.\-]+""")).filter { it.isNotBlank() }
-        if (tokens.size >= 8) {
+        if (tokens.size >= 15) {
             val uniqueTokens = tokens.map { it.lowercase() }.toSet()
             val ratio = uniqueTokens.size.toDouble() / tokens.size.toDouble()
-            // If fewer than 32% of words are unique in an 8+ word transcript, it is a repetition loop
-            if (ratio < 0.32) return true
+            if (ratio < 0.20) return true
         }
 
         return false

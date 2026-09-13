@@ -68,19 +68,13 @@ data class Recording(
     val durationMs: Int = 0
 ) {
     @delegate:Transient
+    val decodedTranscription: String by lazy {
+        SimpleEncryption.decrypt(contentEncrypted)
+    }
+
+    @delegate:Transient
     val decodedSummary: String by lazy {
         SimpleEncryption.decrypt(summaryEncrypted)
-    }
-
-    @delegate:Transient
-    val decodedTranscription: String by lazy {
-        val raw = SimpleEncryption.decrypt(contentEncrypted)
-        TranscriptionValidator.sanitizeTranscription(raw, decodedSummary)
-    }
-
-    @delegate:Transient
-    val rawTranscription: String by lazy {
-        SimpleEncryption.decrypt(contentEncrypted)
     }
 }
 
@@ -103,6 +97,9 @@ interface RecordingDao {
 
     @Query("UPDATE recordings SET durationMs = :durationMs WHERE id = :id")
     suspend fun updateDuration(id: Int, durationMs: Int)
+
+    @Query("UPDATE recordings SET timestamp = :timestamp WHERE id = :id")
+    suspend fun updateTimestamp(id: Int, timestamp: Long)
 
     @Query("DELETE FROM recordings WHERE id = :id")
     suspend fun deleteRecordingById(id: Int)
@@ -134,6 +131,8 @@ class RecordingRepository(private val dao: RecordingDao) {
     suspend fun insert(recording: Recording): Long = dao.insertRecording(recording)
 
     suspend fun updateDuration(id: Int, durationMs: Int) = dao.updateDuration(id, durationMs)
+
+    suspend fun updateTimestamp(id: Int, timestamp: Long) = dao.updateTimestamp(id, timestamp)
 
     suspend fun deleteById(id: Int) = dao.deleteRecordingById(id)
 }

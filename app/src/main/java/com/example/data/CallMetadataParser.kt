@@ -18,6 +18,19 @@ enum class CallDirection {
 object CallMetadataParser {
 
     private val metadataCache = java.util.concurrent.ConcurrentHashMap<String, CallMetadata>()
+    private val timestampCache = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    // 1. YYYYMMDD_HHMMSS or YYYYMMDD-HHMMSS (e.g. 20260910_204852)
+    private val yyyymmddHhmmssRegex = Regex("""(?<=[^0-9]|^)(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])[_\-]([01]\d|2[0-3])([0-5]\d)([0-5]\d)(?=[^0-9]|$)""")
+
+    // 2. ISO YYYY-MM-DD_HH-MM-SS or YYYY-MM-DD-HH-MM-SS
+    private val isoDateTimeRegex = Regex("""(?<=[^0-9]|^)(20\d{2})[_\-.](0[1-9]|1[0-2])[_\-.](0[1-9]|[12]\d|3[01])[_\-\sT]([01]\d|2[0-3])[_\-.:]([0-5]\d)(?:[_\-.:]([0-5]\d))?(?=[^0-9]|$)""")
+
+    // 3. Samsung YYMMDD_HHMMSS (e.g. 260307_125256 for March 7, 2026 12:52:56)
+    private val yymmddHhmmssRegex = Regex("""(?<=[^0-9]|^)([1-3]\d)(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])[_\-]([01]\d|2[0-3])([0-5]\d)([0-5]\d)(?=[^0-9]|$)""")
+
+    // 4. YYYYMMDD date only (e.g. 20260910)
+    private val ymdOnlyRegex = Regex("""(?<=[^0-9]|^)(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(?=[^0-9]|$)""")
 
     // Matches phone numbers: optional country code, optional groupings (7 to 20 chars)
     private val phoneRegex = Regex("""\+?[0-9][0-9\s\-()]{5,18}[0-9]""")
@@ -108,6 +121,79 @@ object CallMetadataParser {
         } catch (_: Exception) {
             fileName.substringBeforeLast(".")
         }
+    }
+
+    /**
+     * Extracts the real chronological timestamp from the call recording filename.
+     * Accurately parses Samsung (YYMMDD_HHMMSS, YYYYMMDD_HHMMSS), ISO (YYYY-MM-DD_HH-MM-SS),
+     * and date formats, with fallback to filesystem timestamp.
+     */
+    fun extractCallTimestamp(fileName: String, fallbackLastModified: Long = 0L): Long {
+        timestampCache[fileName]?.let { return it }
+        val parsed = extractCallTimestampInternal(fileName, fallbackLastModified)
+        timestampCache[fileName] = parsed
+        return parsed
+    }
+
+    private fun extractCallTimestampInternal(fileName: String, fallbackLastModified: Long): Long {
+        val baseName = fileName.substringBeforeLast(".")
+
+        // 1. YYYYMMDD_HHMMSS or YYYYMMDD-HHMMSS (e.g. 20260910_204852)
+        yyyymmddHhmmssRegex.find(baseName)?.let { match ->
+            try {
+                val (y, m, d, hh, mm, ss) = match.destructured
+                val cal = java.util.Calendar.getInstance()
+                cal.set(y.toInt(), m.toInt() - 1, d.toInt(), hh.toInt(), mm.toInt(), ss.toInt())
+                cal.set(java.util.Calendar.MILLISECOND, 0)
+                val time = cal.timeInMillis
+                if (time in 946684800000L..2524608000000L) return time
+            } catch (_: Exception) {}
+        }
+
+        // 2. ISO YYYY-MM-DD_HH-MM-SS
+        isoDateTimeRegex.find(baseName)?.let { match ->
+            try {
+                val y = match.groupValues[1].toInt()
+                val m = match.groupValues[2].toInt()
+                val d = match.groupValues[3].toInt()
+                val hh = match.groupValues[4].toInt()
+                val mm = match.groupValues[5].toInt()
+                val ss = match.groupValues.getOrNull(6)?.toIntOrNull() ?: 0
+                val cal = java.util.Calendar.getInstance()
+                cal.set(y, m - 1, d, hh, mm, ss)
+                cal.set(java.util.Calendar.MILLISECOND, 0)
+                val time = cal.timeInMillis
+                if (time in 946684800000L..2524608000000L) return time
+            } catch (_: Exception) {}
+        }
+
+        // 3. Samsung YYMMDD_HHMMSS (e.g. 260307_125256 -> March 7, 2026 12:52:56)
+        yymmddHhmmssRegex.find(baseName)?.let { match ->
+            try {
+                val (yy, m, d, hh, mm, ss) = match.destructured
+                val y = 2000 + yy.toInt()
+                val cal = java.util.Calendar.getInstance()
+                cal.set(y, m.toInt() - 1, d.toInt(), hh.toInt(), mm.toInt(), ss.toInt())
+                cal.set(java.util.Calendar.MILLISECOND, 0)
+                val time = cal.timeInMillis
+                if (time in 946684800000L..2524608000000L) return time
+            } catch (_: Exception) {}
+        }
+
+        // 4. YYYYMMDD date only (e.g. 20260910)
+        ymdOnlyRegex.find(baseName)?.let { match ->
+            try {
+                val (y, m, d) = match.destructured
+                val cal = java.util.Calendar.getInstance()
+                cal.set(y.toInt(), m.toInt() - 1, d.toInt(), 12, 0, 0)
+                cal.set(java.util.Calendar.MILLISECOND, 0)
+                val time = cal.timeInMillis
+                if (time in 946684800000L..2524608000000L) return time
+            } catch (_: Exception) {}
+        }
+
+        // Fallback to filesystem lastModified if valid (> year 2010), else current time
+        return if (fallbackLastModified > 1262304000000L) fallbackLastModified else System.currentTimeMillis()
     }
 
     fun formatDuration(durationMs: Int): String {
