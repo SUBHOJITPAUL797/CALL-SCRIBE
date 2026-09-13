@@ -89,6 +89,7 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.ui.text.style.TextDecoration
 import com.example.data.AutoAnalyzeMode
 import com.example.data.CallerActionItem
@@ -1234,7 +1235,7 @@ fun CallScribeApp(viewModel: CallViewModel) {
                         Button(
                             onClick = {
                                 try {
-                                    viewModel.startSyncWithLimit(context, totalCount)
+                                    viewModel.startSyncWithLimit(context, totalCount, forceReanalyzeAll = true)
                                 } catch (t: Throwable) {
                                     Toast.makeText(context, "Cannot start sync", Toast.LENGTH_SHORT).show()
                                 }
@@ -2209,6 +2210,17 @@ fun RecordingCard(
                                     .border(2.dp, Color.Black, RoundedCornerShape(12.dp))
                             ) {
                                 DropdownMenuItem(
+                                    text = { Text("⚡ Re-transcribe & Summarize", fontWeight = FontWeight.Bold) },
+                                    onClick = {
+                                        showMenu = false
+                                        onReanalyze()
+                                    },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Refresh, contentDescription = null, tint = Color.Black)
+                                    }
+                                )
+                                HorizontalDivider(thickness = 1.dp, color = Color.LightGray)
+                                DropdownMenuItem(
                                     text = { Text("Share Call", fontWeight = FontWeight.Bold) },
                                     onClick = {
                                         showMenu = false
@@ -2334,8 +2346,28 @@ fun RecordingCard(
                                 color = Color.Black,
                                 fontWeight = FontWeight.Black
                             )
-                            IconButton(onClick = onCopySummary, modifier = Modifier.size(24.dp)) {
-                                Icon(Icons.Default.ContentCopy, contentDescription = "Copy Summary", tint = Color.Black, modifier = Modifier.size(16.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(
+                                    onClick = {
+                                        try {
+                                            onReanalyze()
+                                        } catch (t: Throwable) {
+                                            android.util.Log.e("CallScribe", "Error starting reanalysis: ${t.localizedMessage}", t)
+                                        }
+                                    },
+                                    modifier = Modifier.size(24.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Refresh,
+                                        contentDescription = "Re-transcribe & Summarize",
+                                        tint = Color.Black,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(4.dp))
+                                IconButton(onClick = onCopySummary, modifier = Modifier.size(24.dp)) {
+                                    Icon(Icons.Default.ContentCopy, contentDescription = "Copy Summary", tint = Color.Black, modifier = Modifier.size(16.dp))
+                                }
                             }
                         }
                         Spacer(modifier = Modifier.height(4.dp))
@@ -2351,62 +2383,62 @@ fun RecordingCard(
                             recording.decodedTranscription.contains("Transcription requires") ||
                             recording.decodedTranscription.contains("On-Device Speech Analysis") ||
                             recording.decodedTranscription.isBlank()
-                        if (needsAiTranscription) {
+
+                        if (isAnalyzing) {
                             Spacer(modifier = Modifier.height(10.dp))
-                            if (isAnalyzing) {
-                                Surface(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .border(2.dp, Color.Black, RoundedCornerShape(8.dp)),
-                                    color = MaterialTheme.colorScheme.primaryContainer,
-                                    shape = RoundedCornerShape(8.dp)
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .border(2.dp, Color.Black, RoundedCornerShape(8.dp)),
+                                color = MaterialTheme.colorScheme.primaryContainer,
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
                                 ) {
-                                    Column(
-                                        modifier = Modifier.padding(12.dp),
-                                        horizontalAlignment = Alignment.CenterHorizontally
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.Center
                                     ) {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.Center
-                                        ) {
-                                            CircularProgressIndicator(
-                                                modifier = Modifier.size(16.dp),
-                                                strokeWidth = 2.5.dp,
-                                                color = Color.Black
-                                            )
-                                            Spacer(modifier = Modifier.width(8.dp))
-                                            Text(
-                                                "⚡ Transcribing & Analyzing with AI...",
-                                                fontWeight = FontWeight.Bold,
-                                                color = Color.Black,
-                                                style = MaterialTheme.typography.labelLarge
-                                            )
-                                        }
-                                        Spacer(modifier = Modifier.height(8.dp))
-                                        LinearProgressIndicator(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .height(6.dp),
-                                            color = MaterialTheme.colorScheme.secondary,
-                                            trackColor = Color(0xFFE5E7EB)
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(16.dp),
+                                            strokeWidth = 2.5.dp,
+                                            color = Color.Black
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            "⚡ Transcribing & Analyzing with AI...",
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.Black,
+                                            style = MaterialTheme.typography.labelLarge
                                         )
                                     }
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    LinearProgressIndicator(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(6.dp),
+                                        color = MaterialTheme.colorScheme.secondary,
+                                        trackColor = Color(0xFFE5E7EB)
+                                    )
                                 }
-                            } else {
-                                Button(
-                                    onClick = {
-                                        try {
-                                            onReanalyze()
-                                        } catch (t: Throwable) {
-                                            android.util.Log.e("CallScribe", "Error starting reanalysis: ${t.localizedMessage}", t)
-                                        }
-                                    },
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color.Black),
-                                    shape = RoundedCornerShape(8.dp),
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Text("⚡ Transcribe & Analyze Call", fontWeight = FontWeight.Bold, color = Color.White)
-                                }
+                            }
+                        } else if (needsAiTranscription) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Button(
+                                onClick = {
+                                    try {
+                                        onReanalyze()
+                                    } catch (t: Throwable) {
+                                        android.util.Log.e("CallScribe", "Error starting reanalysis: ${t.localizedMessage}", t)
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color.Black),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("⚡ Transcribe & Analyze Call", fontWeight = FontWeight.Bold, color = Color.White)
                             }
                         }
                     }

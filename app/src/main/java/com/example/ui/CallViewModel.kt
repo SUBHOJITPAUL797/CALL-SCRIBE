@@ -861,7 +861,7 @@ class CallViewModel(
         }
     }
 
-    fun startSyncWithLimit(context: Context, limit: Int) {
+    fun startSyncWithLimit(context: Context, limit: Int, forceReanalyzeAll: Boolean = false) {
         val appContext = context.applicationContext
         try {
             val treeUri = selectedFolderForLimit.value ?: return
@@ -912,7 +912,7 @@ class CallViewModel(
                                     val existing = try { repository.getByUri(file.uri.toString()) } catch (_: Throwable) { null }
                                     val hasRealTranscript = existing != null && hasValidTranscript(existing.decodedTranscription)
 
-                                    if (hasRealTranscript) {
+                                    if (hasRealTranscript && !forceReanalyzeAll) {
                                         alreadyAnalyzed++
                                     } else {
                                         filesNeedingAnalysis.add(file)
