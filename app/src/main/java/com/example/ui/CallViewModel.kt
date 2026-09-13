@@ -1391,7 +1391,15 @@ class CallViewModel(
             }
             if (!isApiKeyConfigured() && !isNvidiaKeyConfigured() && !isCloudflareConfigured() && preferredEngine.value != PreferredEngine.ON_DEVICE) {
                 android.util.Log.w("CallScribe", "reanalyzeRecording: No AI engine configured and engine is not ON_DEVICE")
-                updateStatusMessage.value = "⚠️ Please configure an AI Engine (Cloudflare, Gemini, or NVIDIA) first."
+                updateStatusMessage.value = "⚠️ Please configure an AI Engine (Cloudflare or Gemini) to transcribe audio."
+                showApiKeyDialog.value = true
+                return
+            }
+
+            if (preferredEngine.value == PreferredEngine.ON_DEVICE && !hasValidTranscript(recording.decodedTranscription)) {
+                android.util.Log.w("CallScribe", "reanalyzeRecording: Cannot transcribe raw audio in On-Device mode")
+                updateStatusMessage.value = "📱 On-Device mode cannot transcribe raw audio. Configure Cloudflare Worker or Gemini in 🔑 Settings."
+                showApiKeyDialog.value = true
                 return
             }
 

@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.CalendarToday
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.PlayArrow
@@ -236,6 +237,7 @@ fun CallScribeApp(viewModel: CallViewModel) {
     var isTestingCloudflare by remember { mutableStateOf(false) }
     var selectedEngine by remember { mutableStateOf(PreferredEngine.AUTO) }
     var selectedLanguage by remember { mutableStateOf(SpokenLanguage.AUTO) }
+    val activeEngine by viewModel.preferredEngine.collectAsStateWithLifecycle()
 
     LaunchedEffect(showApiKeyDialog) {
         if (showApiKeyDialog) {
@@ -679,6 +681,45 @@ fun CallScribeApp(viewModel: CallViewModel) {
                                     Text(engine.displayName, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
                                     Text(engine.description, style = MaterialTheme.typography.bodySmall, color = Color.DarkGray)
                                 }
+                            }
+                        }
+                    }
+                    if (selectedEngine == PreferredEngine.ON_DEVICE) {
+                        Spacer(Modifier.height(6.dp))
+                        Surface(
+                            color = Color(0xFFFEF3C7),
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.5.dp, Color(0xFFF59E0B)),
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                        ) {
+                            Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Info, contentDescription = null, tint = Color(0xFFB45309), modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    text = "📱 On-Device mode performs analysis and Q&A 100% offline on text transcripts. Raw audio (.m4a/.mp3) must first be transcribed with ☁️ Cloudflare Worker (Free Whisper) or 🤖 Gemini.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFF92400E),
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+                    } else if (selectedEngine == PreferredEngine.NVIDIA) {
+                        Spacer(Modifier.height(6.dp))
+                        Surface(
+                            color = Color(0xFFE0F2FE),
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.5.dp, Color(0xFF0284C7)),
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                        ) {
+                            Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Info, contentDescription = null, tint = Color(0xFF0284C7), modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    text = "⚡ NVIDIA NIM provides Llama 3.1 70B for deep summaries and Q&A chat. Pairs automatically with Cloudflare Worker (Whisper) or Gemini for audio transcription.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFF075985),
+                                    fontWeight = FontWeight.SemiBold
+                                )
                             }
                         }
                     }
@@ -1545,7 +1586,18 @@ fun CallScribeApp(viewModel: CallViewModel) {
                 title = {
                     Column {
                         Text("Call Scribe", fontWeight = FontWeight.Black, color = Color.Black)
-                        Text("v${com.example.BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.labelSmall, color = Color.DarkGray, fontWeight = FontWeight.Bold)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("v${com.example.BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.labelSmall, color = Color.DarkGray, fontWeight = FontWeight.Bold)
+                            Text(" • ", style = MaterialTheme.typography.labelSmall, color = Color.DarkGray, fontWeight = FontWeight.Bold)
+                            val engineLabel = when (activeEngine) {
+                                PreferredEngine.AUTO -> "⚡ Auto"
+                                PreferredEngine.CLOUDFLARE -> "☁️ Cloudflare"
+                                PreferredEngine.GEMINI -> "🤖 Gemini"
+                                PreferredEngine.NVIDIA -> "⚡ NVIDIA"
+                                PreferredEngine.ON_DEVICE -> "📱 Offline"
+                            }
+                            Text(engineLabel, style = MaterialTheme.typography.labelSmall, color = Color.Black, fontWeight = FontWeight.ExtraBold)
+                        }
                     }
                 },
                 actions = {

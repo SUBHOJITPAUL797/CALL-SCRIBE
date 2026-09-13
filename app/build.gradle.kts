@@ -14,8 +14,8 @@ android {
     applicationId = "com.subhojitscribe.dasmo.in"
     minSdk = 24
     targetSdk = 36
-    versionCode = 27
-    versionName = "1.6.3"
+    versionCode = 28
+    versionName = "1.6.4"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
