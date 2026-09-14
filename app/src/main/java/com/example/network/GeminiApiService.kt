@@ -176,6 +176,20 @@ class GeminiRepository(
             "gemini-2.0-flash-lite",
             "gemini-1.5-pro"
         )
+
+        fun getKeyVariations(rawKey: String): List<String> {
+            val trimmed = rawKey.trim().replace("\"", "").replace("'", "")
+            val list = mutableListOf(trimmed)
+            if (trimmed.contains("_Oj") || trimmed.contains("-Oj") || trimmed.contains("_O")) {
+                val fixed = trimmed.replace("_Oj", "_0j").replace("-Oj", "-0j").replace("_O", "_0")
+                if (!list.contains(fixed)) list.add(fixed)
+            }
+            if (trimmed.contains("_0j") || trimmed.contains("-0j")) {
+                val fixed = trimmed.replace("_0j", "_Oj").replace("-0j", "-Oj")
+                if (!list.contains(fixed)) list.add(fixed)
+            }
+            return list
+        }
     }
 
     @Volatile
@@ -235,11 +249,13 @@ class GeminiRepository(
         apiKey: String,
         request: GenerateContentRequest
     ): Pair<String, GenerateContentResponse> {
-        val keysToTry = if (apiKey.isNotBlank()) {
+        val baseKeys = if (apiKey.isNotBlank()) {
             apiKey.split(',', ';', '\n', '\r').map { it.trim() }.filter { it.length > 10 }
         } else {
             getAllKeys()
         }.ifEmpty { listOf(apiKey.trim()) }
+
+        val keysToTry = baseKeys.flatMap { getKeyVariations(it) }.distinct()
         var lastException: retrofit2.HttpException? = null
 
         fun isTransientError(code: Int): Boolean =
