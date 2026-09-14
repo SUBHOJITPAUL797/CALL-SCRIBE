@@ -241,7 +241,8 @@ class CallViewModel(
 
     fun testApiKey(apiKey: String, onResult: (Boolean, String) -> Unit) {
         viewModelScope.launch {
-            val res = geminiRepository.testApiKey(apiKey)
+            val tempRepo = com.example.network.GeminiRepository(apiKeyProvider = { apiKey })
+            val res = tempRepo.testApiKey(apiKey)
             res.onSuccess { msg -> onResult(true, msg) }
                .onFailure { err -> onResult(false, err.localizedMessage ?: "Connection error") }
         }

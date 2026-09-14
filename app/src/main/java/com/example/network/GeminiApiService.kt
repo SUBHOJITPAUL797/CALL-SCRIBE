@@ -165,11 +165,13 @@ class GeminiRepository(
     companion object {
         // High-capacity production models in priority order for speech & summarization
         val CANDIDATE_MODELS = listOf(
-            "gemini-2.0-flash",
-            "gemini-1.5-flash",
             "gemini-3.6-flash",
             "gemini-3.5-flash",
+            "gemini-3.7-flash",
             "gemini-flash-latest",
+            "gemini-flash-lite-latest",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash",
             "gemini-1.5-flash-8b",
             "gemini-2.0-flash-lite",
             "gemini-1.5-pro"
@@ -233,11 +235,15 @@ class GeminiRepository(
         apiKey: String,
         request: GenerateContentRequest
     ): Pair<String, GenerateContentResponse> {
-        val keysToTry = getAllKeys().ifEmpty { listOf(apiKey.trim()) }
+        val keysToTry = if (apiKey.isNotBlank()) {
+            apiKey.split(',', ';', '\n', '\r').map { it.trim() }.filter { it.length > 10 }
+        } else {
+            getAllKeys()
+        }.ifEmpty { listOf(apiKey.trim()) }
         var lastException: retrofit2.HttpException? = null
 
         fun isTransientError(code: Int): Boolean =
-            code == 404 || code == 429 || code == 503 || code == 500 || code == 502 || code == 504
+            code == 404 || code == 429 || code == 503 || code == 500 || code == 502 || code == 504 || code == 400
 
         for (activeKey in keysToTry) {
             // 1. Try cached working model first on current active key
@@ -246,12 +252,8 @@ class GeminiRepository(
                     val response = RetrofitClient.service.generateContent(model, activeKey, request)
                     return Pair(model, response)
                 } catch (e: retrofit2.HttpException) {
-                    if (isTransientError(e.code())) {
-                        cachedWorkingModel = null
-                        lastException = e
-                    } else {
-                        throw e
-                    }
+                    cachedWorkingModel = null
+                    lastException = e
                 }
             }
 
@@ -265,12 +267,9 @@ class GeminiRepository(
                     cachedWorkingModel = model
                     return Pair(model, response)
                 } catch (e: retrofit2.HttpException) {
+                    cachedWorkingModel = null
+                    lastException = e
                     if (isTransientError(e.code())) {
-                        // 404 (model not found), 429 (quota/rate limit), or 503/500 (model overloaded)
-                        // Gemini maintains distinct quota pools per model (1.5-flash vs 1.5-flash-8b vs 2.0-flash)!
-                        // Failover to next candidate model immediately without crashing.
-                        cachedWorkingModel = null
-                        lastException = e
                         continue
                     }
                     throw e

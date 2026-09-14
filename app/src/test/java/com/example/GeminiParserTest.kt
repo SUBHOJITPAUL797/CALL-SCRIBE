@@ -102,10 +102,11 @@ class GeminiParserTest {
     @Test
     fun testCandidateModelsContainsProductionModels() {
         val candidates = GeminiRepository.CANDIDATE_MODELS
+        assertTrue("Candidate models must contain gemini-3.6-flash", candidates.contains("gemini-3.6-flash"))
         assertTrue("Candidate models must contain gemini-2.0-flash", candidates.contains("gemini-2.0-flash"))
         assertTrue("Candidate models must contain gemini-1.5-flash", candidates.contains("gemini-1.5-flash"))
         assertTrue("Candidate models must contain gemini-1.5-pro", candidates.contains("gemini-1.5-pro"))
-        assertEquals("gemini-2.0-flash should be top priority fallback", "gemini-2.0-flash", candidates.first())
+        assertEquals("gemini-3.6-flash should be top priority fallback", "gemini-3.6-flash", candidates.first())
     }
 
     @Test
