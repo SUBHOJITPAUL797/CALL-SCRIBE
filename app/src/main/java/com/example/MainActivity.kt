@@ -910,8 +910,8 @@ fun CallScribeApp(viewModel: CallViewModel) {
                     OutlinedTextField(
                         value = enteredApiKey,
                         onValueChange = { enteredApiKey = it; apiKeyTestResult = null },
-                        label = { Text("Gemini Key(s) (AIzaSy...)", fontWeight = FontWeight.Bold) },
-                        placeholder = { Text("Paste key (or multiple keys separated by commas)") },
+                        label = { Text("Gemini Key(s) (AIzaSy... or AQ...)", fontWeight = FontWeight.Bold) },
+                        placeholder = { Text("Paste key (AIzaSy... or AQ...)") },
                         singleLine = false,
                         maxLines = 3,
                         visualTransformation = if (apiKeyVisible) VisualTransformation.None else PasswordVisualTransformation(),

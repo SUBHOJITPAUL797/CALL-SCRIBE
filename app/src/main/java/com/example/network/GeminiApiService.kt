@@ -6,6 +6,7 @@ import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
 import retrofit2.http.Body
 import retrofit2.http.GET
+import retrofit2.http.Header
 import retrofit2.http.POST
 import retrofit2.http.Path
 import retrofit2.http.Query
@@ -73,13 +74,13 @@ data class Candidate(
 interface GeminiApiService {
     @GET("v1beta/models")
     suspend fun listModels(
-        @Query("key") apiKey: String
+        @Header("x-goog-api-key") apiKey: String
     ): ListModelsResponse
 
     @POST("v1beta/models/{model}:generateContent")
     suspend fun generateContent(
         @Path("model") model: String,
-        @Query("key") apiKey: String,
+        @Header("x-goog-api-key") apiKey: String,
         @Body request: GenerateContentRequest
     ): GenerateContentResponse
 }
@@ -166,6 +167,9 @@ class GeminiRepository(
         val CANDIDATE_MODELS = listOf(
             "gemini-2.0-flash",
             "gemini-1.5-flash",
+            "gemini-3.6-flash",
+            "gemini-3.5-flash",
+            "gemini-flash-latest",
             "gemini-1.5-flash-8b",
             "gemini-2.0-flash-lite",
             "gemini-1.5-pro"
@@ -204,10 +208,16 @@ class GeminiRepository(
 
             if (available.isNotEmpty()) {
                 val sorted = available.sortedWith(
-                    compareByDescending<String> { it == "gemini-1.5-flash" }
-                        .thenByDescending { it == "gemini-1.5-flash-8b" }
+                    compareByDescending<String> { it.contains("3.8-flash") }
+                        .thenByDescending { it.contains("3.7-flash") }
+                        .thenByDescending { it.contains("3.6-flash") }
+                        .thenByDescending { it.contains("3.5-flash") && !it.contains("lite") }
+                        .thenByDescending { it.contains("3.5-flash-lite") }
+                        .thenByDescending { it == "gemini-flash-latest" }
+                        .thenByDescending { it == "gemini-flash-lite-latest" }
                         .thenByDescending { it == "gemini-2.0-flash" }
-                        .thenByDescending { it == "gemini-2.0-flash-lite" }
+                        .thenByDescending { it == "gemini-1.5-flash" }
+                        .thenByDescending { it == "gemini-1.5-flash-8b" }
                         .thenByDescending { it.contains("flash") && !it.contains("exp") }
                         .thenByDescending { it.contains("flash") }
                 )
