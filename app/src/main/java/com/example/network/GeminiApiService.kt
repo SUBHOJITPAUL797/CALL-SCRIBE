@@ -178,12 +178,13 @@ class GeminiRepository(
         )
 
         fun getKeyVariations(rawKey: String): List<String> {
-            val trimmed = rawKey.trim().replace("\"", "").replace("'", "")
-            val list = mutableListOf(trimmed)
+            val trimmed = rawKey.trim().replace("\"", "").replace("'", "").replace("`", "")
+            val list = mutableListOf<String>()
             if (trimmed.contains("_Oj") || trimmed.contains("-Oj") || trimmed.contains("_O")) {
                 val fixed = trimmed.replace("_Oj", "_0j").replace("-Oj", "-0j").replace("_O", "_0")
-                if (!list.contains(fixed)) list.add(fixed)
+                list.add(fixed)
             }
+            if (!list.contains(trimmed)) list.add(trimmed)
             if (trimmed.contains("_0j") || trimmed.contains("-0j")) {
                 val fixed = trimmed.replace("_0j", "_Oj").replace("-0j", "-Oj")
                 if (!list.contains(fixed)) list.add(fixed)
@@ -203,7 +204,7 @@ class GeminiRepository(
         if (!pool.isNullOrEmpty()) return pool
         val raw = apiKeyProvider().trim()
         val split = raw.split(',', ';', '\n', '\r')
-            .map { it.trim() }
+            .map { it.trim().replace("\"", "").replace("'", "").replace("`", "") }
             .filter { it.length > 10 && !it.equals("MY_GEMINI_API_KEY", ignoreCase = true) && !it.equals("YOUR_API_KEY", ignoreCase = true) }
         return if (split.isNotEmpty()) split else if (raw.length > 10) listOf(raw) else emptyList()
     }
@@ -250,10 +251,10 @@ class GeminiRepository(
         request: GenerateContentRequest
     ): Pair<String, GenerateContentResponse> {
         val baseKeys = if (apiKey.isNotBlank()) {
-            apiKey.split(',', ';', '\n', '\r').map { it.trim() }.filter { it.length > 10 }
+            apiKey.split(',', ';', '\n', '\r').map { it.trim().replace("\"", "").replace("'", "").replace("`", "") }.filter { it.length > 10 }
         } else {
             getAllKeys()
-        }.ifEmpty { listOf(apiKey.trim()) }
+        }.ifEmpty { listOf(apiKey.trim().replace("\"", "").replace("'", "").replace("`", "")) }
 
         val keysToTry = baseKeys.flatMap { getKeyVariations(it) }.distinct()
         var lastException: retrofit2.HttpException? = null
@@ -262,6 +263,8 @@ class GeminiRepository(
             code == 404 || code == 429 || code == 503 || code == 500 || code == 502 || code == 504 || code == 400
 
         for (activeKey in keysToTry) {
+            var keyUnauthorized = false
+
             // 1. Try cached working model first on current active key
             cachedWorkingModel?.let { model ->
                 try {
@@ -270,7 +273,13 @@ class GeminiRepository(
                 } catch (e: retrofit2.HttpException) {
                     cachedWorkingModel = null
                     lastException = e
+                    if (e.code() == 401 || e.code() == 403) {
+                        keyUnauthorized = true
+                    }
                 }
+            }
+            if (keyUnauthorized) {
+                continue
             }
 
             // 2. Discover available models from Google AI Studio for this active key
@@ -285,11 +294,19 @@ class GeminiRepository(
                 } catch (e: retrofit2.HttpException) {
                     cachedWorkingModel = null
                     lastException = e
+                    if (e.code() == 401 || e.code() == 403) {
+                        keyUnauthorized = true
+                        break
+                    }
                     if (isTransientError(e.code())) {
                         continue
                     }
                     throw e
                 }
+            }
+
+            if (keyUnauthorized) {
+                continue
             }
 
             // If active key was throttled across all models, notify key rotation

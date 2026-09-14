@@ -21,11 +21,11 @@ class ApiKeyManager(context: Context) {
         val userRaw = prefs.getString(KEY_GEMINI_API_KEY, "")?.trim() ?: ""
         if (userRaw.isNotBlank()) {
             val parsed = userRaw.split(',', ';', '\n', '\r')
-                .map { it.trim() }
+                .map { it.trim().replace("\"", "").replace("'", "").replace("`", "") }
                 .filter { it.length > 10 && !it.equals("MY_GEMINI_API_KEY", ignoreCase = true) && !it.equals("YOUR_API_KEY", ignoreCase = true) }
             if (parsed.isNotEmpty()) return parsed
         }
-        val buildKey = BuildConfig.GEMINI_API_KEY.trim()
+        val buildKey = BuildConfig.GEMINI_API_KEY.trim().replace("\"", "").replace("'", "").replace("`", "")
         if (buildKey.isNotBlank() &&
             !buildKey.equals("MY_GEMINI_API_KEY", ignoreCase = true) &&
             !buildKey.equals("YOUR_API_KEY", ignoreCase = true) &&
@@ -41,7 +41,8 @@ class ApiKeyManager(context: Context) {
     }
 
     fun setApiKey(apiKey: String) {
-        prefs.edit().putString(KEY_GEMINI_API_KEY, apiKey.trim()).apply()
+        val clean = apiKey.trim().replace("\"", "").replace("'", "").replace("`", "")
+        prefs.edit().putString(KEY_GEMINI_API_KEY, clean).apply()
     }
 
     /**

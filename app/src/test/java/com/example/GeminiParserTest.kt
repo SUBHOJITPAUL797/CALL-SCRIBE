@@ -140,4 +140,25 @@ class GeminiParserTest {
         assertEquals("gemini-3.5-flash-lite", sorted[2])
         assertEquals("gemini-3.1-pro", sorted[3])
     }
+
+    @Test
+    fun testKeyVariationsTypoAutoRepair() {
+        val typoKeyWithQuotes = "\"MOCK_GEMINI_KEY_SAMPLE_Oj_TAIL\""
+        val variations = GeminiRepository.getKeyVariations(typoKeyWithQuotes)
+
+        // Must strip quotes
+        assertTrue("Must strip quotes", variations.none { it.contains("\"") })
+        // Must prioritize the fixed _0j version
+        assertEquals("MOCK_GEMINI_KEY_SAMPLE_0j_TAIL", variations.first())
+        // Must also include the original variation
+        assertTrue(variations.contains("MOCK_GEMINI_KEY_SAMPLE_Oj_TAIL"))
+    }
+
+    @Test
+    fun testKeyVariationsCleanKey() {
+        val cleanKey = "MOCK_GEMINI_KEY_SAMPLE_0j_TAIL"
+        val variations = GeminiRepository.getKeyVariations(cleanKey)
+        assertEquals(cleanKey, variations.first())
+        assertTrue(variations.contains("MOCK_GEMINI_KEY_SAMPLE_Oj_TAIL"))
+    }
 }

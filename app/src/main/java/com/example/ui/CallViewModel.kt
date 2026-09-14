@@ -241,8 +241,9 @@ class CallViewModel(
 
     fun testApiKey(apiKey: String, onResult: (Boolean, String) -> Unit) {
         viewModelScope.launch {
-            val tempRepo = com.example.network.GeminiRepository(apiKeyProvider = { apiKey })
-            val res = tempRepo.testApiKey(apiKey)
+            val cleanKey = apiKey.trim().replace("\"", "").replace("'", "").replace("`", "")
+            val tempRepo = com.example.network.GeminiRepository(apiKeyProvider = { cleanKey })
+            val res = tempRepo.testApiKey(cleanKey)
             res.onSuccess { msg -> onResult(true, msg) }
                .onFailure { err -> onResult(false, err.localizedMessage ?: "Connection error") }
         }
