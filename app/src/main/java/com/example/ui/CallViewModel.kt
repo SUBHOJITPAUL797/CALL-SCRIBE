@@ -1244,9 +1244,10 @@ class CallViewModel(
                         if (base64Audio != null) {
                             var geminiResult = geminiRepository.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
 
-                            // If rate limit (429) hit, wait 5 seconds and retry once
-                            if (geminiResult.exceptionOrNull() is ApiQuotaExceededException) {
-                                kotlinx.coroutines.delay(5000)
+                            // If rate limit (429) or temporary server overload (503), delay 2.5s and retry once
+                            val initialErr = geminiResult.exceptionOrNull()
+                            if (initialErr is ApiQuotaExceededException || initialErr?.message?.contains("503") == true || initialErr?.message?.contains("overloaded", ignoreCase = true) == true) {
+                                kotlinx.coroutines.delay(2500)
                                 geminiResult = geminiRepository.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
                             }
 
@@ -1424,23 +1425,23 @@ class CallViewModel(
                 return
             }
 
-            if (preferredEngine.value == PreferredEngine.NVIDIA && !isCloudflareConfigured() && !isApiKeyConfigured()) {
-                android.util.Log.w("CallScribe", "reanalyzeRecording: NVIDIA mode requires Cloudflare or Gemini for transcription")
-                updateStatusMessage.value = "⚡ NVIDIA NIM requires Cloudflare Worker or Gemini to transcribe audio. Please configure in 🔑 Settings."
+            if (preferredEngine.value == PreferredEngine.NVIDIA && !isApiKeyConfigured()) {
+                android.util.Log.w("CallScribe", "reanalyzeRecording: NVIDIA mode requires Gemini for transcription")
+                updateStatusMessage.value = "⚡ NVIDIA NIM requires Google Gemini to transcribe audio. Please configure your Gemini API Key in 🔑 Settings."
                 showApiKeyDialog.value = true
                 return
             }
 
             if (preferredEngine.value == PreferredEngine.ON_DEVICE && !hasValidTranscript(recording.decodedTranscription)) {
                 android.util.Log.w("CallScribe", "reanalyzeRecording: Cannot transcribe raw audio in On-Device mode")
-                updateStatusMessage.value = "📱 On-Device mode cannot transcribe raw audio. Configure Cloudflare Worker or Gemini in 🔑 Settings."
+                updateStatusMessage.value = "📱 On-Device mode cannot transcribe raw audio. Configure Google Gemini in 🔑 Settings."
                 showApiKeyDialog.value = true
                 return
             }
 
             if (!isApiKeyConfigured() && !isNvidiaKeyConfigured() && !isCloudflareConfigured() && preferredEngine.value != PreferredEngine.ON_DEVICE) {
                 android.util.Log.w("CallScribe", "reanalyzeRecording: No AI engine configured and engine is not ON_DEVICE")
-                updateStatusMessage.value = "⚠️ Please configure an AI Engine (Cloudflare or Gemini) to transcribe audio."
+                updateStatusMessage.value = "⚠️ Please configure Google Gemini in 🔑 Settings to transcribe audio."
                 showApiKeyDialog.value = true
                 return
             }
@@ -1550,13 +1551,25 @@ class CallViewModel(
                             updateStatusMessage.value = "⏳ 1-minute speed limit reached. Resets in 30–60s. Please wait!"
                         } else {
                             val rawMsg = err?.localizedMessage ?: err?.javaClass?.simpleName ?: "Unknown error"
-                            val cleanMsg = when {
-                                rawMsg.contains("3010") || rawMsg.contains("Invalid audio input", ignoreCase = true) ->
-                                    "Cloudflare Whisper cannot decode mobile call audio (.m4a/.amr). Please select Google Gemini in 🔑 Settings."
-                                rawMsg.contains("3006") || rawMsg.contains("too large", ignoreCase = true) ->
-                                    "Audio exceeds Cloudflare Whisper model limit. Please select Google Gemini in 🔑 Settings for full calls."
-                                rawMsg.contains("1102") || rawMsg.contains("503") ->
-                                    "Cloudflare Worker execution limit reached on long recording. Please select Google Gemini in 🔑 Settings for full calls."
+                            val cleanMsg = when (preferredEngine.value) {
+                                PreferredEngine.CLOUDFLARE -> when {
+                                    rawMsg.contains("3010") || rawMsg.contains("Invalid audio input", ignoreCase = true) ->
+                                        "Cloudflare Whisper cannot decode mobile call audio (.m4a/.amr). Please select Google Gemini in 🔑 Settings."
+                                    rawMsg.contains("3006") || rawMsg.contains("too large", ignoreCase = true) ->
+                                        "Audio exceeds Cloudflare Whisper model limit. Please select Google Gemini in 🔑 Settings for full calls."
+                                    rawMsg.contains("1102") || rawMsg.contains("503") ->
+                                        "Cloudflare Worker execution limit reached on long recording. Please select Google Gemini in 🔑 Settings for full calls."
+                                    else -> rawMsg
+                                }
+                                PreferredEngine.GEMINI, PreferredEngine.NVIDIA -> when {
+                                    rawMsg.contains("503") || rawMsg.contains("overloaded", ignoreCase = true) ->
+                                        "Google Gemini is temporarily busy. Please tap 'Transcribe & Analyze Call' again in a few moments."
+                                    rawMsg.contains("403") || rawMsg.contains("API_KEY_INVALID", ignoreCase = true) ->
+                                        "Google Gemini API key is invalid or expired. Check your key in 🔑 Settings."
+                                    rawMsg.contains("404") ->
+                                        "Google Gemini model not found for this region. Trying fallback model."
+                                    else -> rawMsg
+                                }
                                 else -> rawMsg
                             }
                             updateStatusMessage.value = "Analysis failed: $cleanMsg"

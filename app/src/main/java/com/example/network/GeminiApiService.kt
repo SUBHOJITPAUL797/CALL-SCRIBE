@@ -204,16 +204,12 @@ class GeminiRepository(
 
             if (available.isNotEmpty()) {
                 val sorted = available.sortedWith(
-                    compareByDescending<String> { it.contains("3.8-flash") }
-                        .thenByDescending { it.contains("3.5-flash") && !it.contains("lite") }
-                        .thenByDescending { it.contains("3.5-flash-lite") }
-                        .thenByDescending { it == "gemini-2.0-flash" }
-                        .thenByDescending { it == "gemini-1.5-flash" }
+                    compareByDescending<String> { it == "gemini-1.5-flash" }
                         .thenByDescending { it == "gemini-1.5-flash-8b" }
+                        .thenByDescending { it == "gemini-2.0-flash" }
                         .thenByDescending { it == "gemini-2.0-flash-lite" }
                         .thenByDescending { it.contains("flash") && !it.contains("exp") }
                         .thenByDescending { it.contains("flash") }
-                        .thenByDescending { it.contains("3.") }
                 )
                 return@withContext sorted
             }
@@ -230,6 +226,9 @@ class GeminiRepository(
         val keysToTry = getAllKeys().ifEmpty { listOf(apiKey.trim()) }
         var lastException: retrofit2.HttpException? = null
 
+        fun isTransientError(code: Int): Boolean =
+            code == 404 || code == 429 || code == 503 || code == 500 || code == 502 || code == 504
+
         for (activeKey in keysToTry) {
             // 1. Try cached working model first on current active key
             cachedWorkingModel?.let { model ->
@@ -237,7 +236,7 @@ class GeminiRepository(
                     val response = RetrofitClient.service.generateContent(model, activeKey, request)
                     return Pair(model, response)
                 } catch (e: retrofit2.HttpException) {
-                    if (e.code() == 404 || e.code() == 429) {
+                    if (isTransientError(e.code())) {
                         cachedWorkingModel = null
                         lastException = e
                     } else {
@@ -256,8 +255,8 @@ class GeminiRepository(
                     cachedWorkingModel = model
                     return Pair(model, response)
                 } catch (e: retrofit2.HttpException) {
-                    if (e.code() == 404 || e.code() == 429) {
-                        // 404 (model not found) or 429 (per-model rate limit/quota reached)
+                    if (isTransientError(e.code())) {
+                        // 404 (model not found), 429 (quota/rate limit), or 503/500 (model overloaded)
                         // Gemini maintains distinct quota pools per model (1.5-flash vs 1.5-flash-8b vs 2.0-flash)!
                         // Failover to next candidate model immediately without crashing.
                         cachedWorkingModel = null
@@ -407,6 +406,7 @@ Do NOT skip any section. Do NOT summarize too briefly. The user needs to know ev
             val exception = when (code) {
                 400, 401, 403 -> ApiKeyInvalidException("Gemini API Key is invalid (HTTP $code). Please check your key in Settings.")
                 429 -> ApiQuotaExceededException("Google AI Studio 1-minute speed limit reached. Your daily 1,500 quota is active! Resets in 30–60s.")
+                503 -> Exception("Google Gemini service is temporarily overloaded. Please try again in a few moments.")
                 else -> {
                     val message = if (!errorBody.isNullOrBlank()) "API Error ($code): $errorBody" else "HTTP error: $code ${e.message()}"
                     Exception(message, e)
