@@ -11,10 +11,10 @@ enum class AutoAnalyzeMode(val displayName: String, val description: String) {
 }
 
 enum class PreferredEngine(val displayName: String, val description: String) {
-    AUTO("⚡ Auto Fallback", "Smart auto-switching: Cloudflare / Gemini → NVIDIA → On-Device"),
-    GEMINI("🤖 Google Gemini (Recommended)", "Best for Bengali, Hindi & phone calls of any length (100% Free)"),
+    AUTO("⚡ Auto Fallback", "Gemini ASR + NVIDIA / Gemini Summaries (Smart Fallback)"),
+    GEMINI("🤖 Google Gemini (Recommended)", "Gemini ASR transcription (+ NVIDIA Llama 3.1 70B summaries & chat if key added)"),
+    NVIDIA("⚡ NVIDIA NIM + Gemini", "Transcribe with Gemini, summarize & chat with NVIDIA Llama 3.1 70B"),
     CLOUDFLARE("☁️ Cloudflare Worker (Beta)", "Whisper AI on edge (Short MP3/WAV only; does not support .m4a/.amr)"),
-    NVIDIA("⚡ NVIDIA NIM", "Llama 3.1 70B Summaries & Chat (transcribe with Gemini/Whisper)"),
     ON_DEVICE("📱 On-Device (Offline)", "Local extractive analysis, 100% offline & private")
 }
 
