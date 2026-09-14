@@ -157,15 +157,18 @@ object GeminiResponseParser {
 }
 
 class GeminiRepository(
-    private val apiKeyProvider: () -> String = { BuildConfig.GEMINI_API_KEY }
+    private val apiKeyProvider: () -> String = { BuildConfig.GEMINI_API_KEY },
+    private val keyPoolProvider: (() -> List<String>)? = null,
+    private val onKeyRotate: ((String) -> Unit)? = null
 ) {
     companion object {
-        // Modern models in order of priority (reliable production models first)
+        // High-capacity production models in priority order for speech & summarization
         val CANDIDATE_MODELS = listOf(
             "gemini-2.0-flash",
             "gemini-1.5-flash",
-            "gemini-1.5-pro",
-            "gemini-2.5-flash"
+            "gemini-1.5-flash-8b",
+            "gemini-2.0-flash-lite",
+            "gemini-1.5-pro"
         )
     }
 
@@ -173,8 +176,21 @@ class GeminiRepository(
     private var cachedWorkingModel: String? = null
 
     /**
+     * Returns all active Gemini keys for automatic failover.
+     */
+    fun getAllKeys(): List<String> {
+        val pool = keyPoolProvider?.invoke()?.filter { it.length > 10 }
+        if (!pool.isNullOrEmpty()) return pool
+        val raw = apiKeyProvider().trim()
+        val split = raw.split(',', ';', '\n', '\r')
+            .map { it.trim() }
+            .filter { it.length > 10 && !it.equals("MY_GEMINI_API_KEY", ignoreCase = true) && !it.equals("YOUR_API_KEY", ignoreCase = true) }
+        return if (split.isNotEmpty()) split else if (raw.length > 10) listOf(raw) else emptyList()
+    }
+
+    /**
      * Dynamically discovers available models for the given API key using Google's ModelService.ListModels.
-     * Returns the models supporting generateContent, prioritizing fast flash models.
+     * Prioritizes high-quota production flash models and excludes low-quota experimental/pro models.
      */
     suspend fun discoverActiveModels(apiKey: String): List<String> = withContext(Dispatchers.IO) {
         try {
@@ -182,6 +198,7 @@ class GeminiRepository(
             val available = response.models
                 ?.filter { it.supportedGenerationMethods?.contains("generateContent") == true }
                 ?.map { it.name.removePrefix("models/") }
+                ?.filter { !it.contains("pro-exp") && !it.contains("thinking-exp") && !it.contains("embed") && !it.contains("aqa") }
                 ?.distinct()
                 ?: emptyList()
 
@@ -190,6 +207,11 @@ class GeminiRepository(
                     compareByDescending<String> { it.contains("3.8-flash") }
                         .thenByDescending { it.contains("3.5-flash") && !it.contains("lite") }
                         .thenByDescending { it.contains("3.5-flash-lite") }
+                        .thenByDescending { it == "gemini-2.0-flash" }
+                        .thenByDescending { it == "gemini-1.5-flash" }
+                        .thenByDescending { it == "gemini-1.5-flash-8b" }
+                        .thenByDescending { it == "gemini-2.0-flash-lite" }
+                        .thenByDescending { it.contains("flash") && !it.contains("exp") }
                         .thenByDescending { it.contains("flash") }
                         .thenByDescending { it.contains("3.") }
                 )
@@ -205,48 +227,58 @@ class GeminiRepository(
         apiKey: String,
         request: GenerateContentRequest
     ): Pair<String, GenerateContentResponse> {
-        // 1. Try cached working model if available
-        cachedWorkingModel?.let { model ->
-            try {
-                val response = RetrofitClient.service.generateContent(model, apiKey, request)
-                return Pair(model, response)
-            } catch (e: retrofit2.HttpException) {
-                if (e.code() == 404) {
-                    cachedWorkingModel = null
-                } else {
+        val keysToTry = getAllKeys().ifEmpty { listOf(apiKey.trim()) }
+        var lastException: retrofit2.HttpException? = null
+
+        for (activeKey in keysToTry) {
+            // 1. Try cached working model first on current active key
+            cachedWorkingModel?.let { model ->
+                try {
+                    val response = RetrofitClient.service.generateContent(model, activeKey, request)
+                    return Pair(model, response)
+                } catch (e: retrofit2.HttpException) {
+                    if (e.code() == 404 || e.code() == 429) {
+                        cachedWorkingModel = null
+                        lastException = e
+                    } else {
+                        throw e
+                    }
+                }
+            }
+
+            // 2. Discover available models from Google AI Studio for this active key
+            val discovered = try { discoverActiveModels(activeKey) } catch (_: Exception) { emptyList() }
+            val allToTry = (CANDIDATE_MODELS + discovered).distinct()
+
+            for (model in allToTry) {
+                try {
+                    val response = RetrofitClient.service.generateContent(model, activeKey, request)
+                    cachedWorkingModel = model
+                    return Pair(model, response)
+                } catch (e: retrofit2.HttpException) {
+                    if (e.code() == 404 || e.code() == 429) {
+                        // 404 (model not found) or 429 (per-model rate limit/quota reached)
+                        // Gemini maintains distinct quota pools per model (1.5-flash vs 1.5-flash-8b vs 2.0-flash)!
+                        // Failover to next candidate model immediately without crashing.
+                        cachedWorkingModel = null
+                        lastException = e
+                        continue
+                    }
                     throw e
                 }
             }
-        }
 
-        // 2. Discover available models from Google AI Studio for this key
-        val discovered = discoverActiveModels(apiKey)
-        val allToTry = (discovered + CANDIDATE_MODELS).distinct()
-
-        var lastException: retrofit2.HttpException? = null
-        for (model in allToTry) {
-            try {
-                val response = RetrofitClient.service.generateContent(model, apiKey, request)
-                cachedWorkingModel = model
-                return Pair(model, response)
-            } catch (e: retrofit2.HttpException) {
-                if (e.code() == 404) {
-                    // Model deprecated or not enabled for this project, try next candidate
-                    lastException = e
-                    continue
-                }
-                throw e
+            // If active key was throttled across all models, notify key rotation
+            if (lastException?.code() == 429) {
+                onKeyRotate?.invoke(activeKey)
             }
         }
-        throw (lastException ?: Exception("No available Gemini model found supporting generateContent."))
+
+        throw (lastException ?: Exception("No available Gemini model or key found supporting generateContent."))
     }
 
     fun isApiKeyConfigured(): Boolean {
-        val key = apiKeyProvider().trim()
-        return key.isNotBlank() &&
-               !key.equals("MY_GEMINI_API_KEY", ignoreCase = true) &&
-               !key.equals("YOUR_API_KEY", ignoreCase = true) &&
-               key.length > 10
+        return getAllKeys().isNotEmpty()
     }
 
     suspend fun summarizeTranscription(transcription: String): String = withContext(Dispatchers.IO) {
@@ -374,7 +406,7 @@ Do NOT skip any section. Do NOT summarize too briefly. The user needs to know ev
             val errorBody = try { e.response()?.errorBody()?.string() } catch (_: Exception) { null }
             val exception = when (code) {
                 400, 401, 403 -> ApiKeyInvalidException("Gemini API Key is invalid (HTTP $code). Please check your key in Settings.")
-                429 -> ApiQuotaExceededException("Gemini rate limit or quota exceeded (HTTP 429). Please wait a moment.")
+                429 -> ApiQuotaExceededException("Google AI Studio 1-minute speed limit reached. Your daily 1,500 quota is active! Resets in 30–60s.")
                 else -> {
                     val message = if (!errorBody.isNullOrBlank()) "API Error ($code): $errorBody" else "HTTP error: $code ${e.message()}"
                     Exception(message, e)
@@ -388,42 +420,60 @@ Do NOT skip any section. Do NOT summarize too briefly. The user needs to know ev
     }
 
     suspend fun testApiKey(apiKey: String): Result<String> = withContext(Dispatchers.IO) {
-        val trimmed = apiKey.trim()
-        if (trimmed.isBlank() || trimmed.length < 10) {
+        val keys = apiKey.split(',', ';', '\n', '\r')
+            .map { it.trim() }
+            .filter { it.length > 10 }
+
+        if (keys.isEmpty()) {
             return@withContext Result.failure(Exception("API Key is too short or empty."))
         }
 
-        val request = GenerateContentRequest(
-            contents = listOf(Content(parts = listOf(Part(text = "Hello")))),
-            generationConfig = GenerationConfig(temperature = 0.1f)
-        )
-        try {
-            val (workingModel, response) = executeWithModelFallback(trimmed, request)
-            if (response.candidates?.isNotEmpty() == true) {
-                Result.success("✅ API Key is valid and working ($workingModel)!")
-            } else {
-                Result.success("✅ Connected to Gemini ($workingModel).")
-            }
-        } catch (e: retrofit2.HttpException) {
-            val code = e.code()
-            val errorBody = try { e.response()?.errorBody()?.string() } catch (_: Exception) { null }
-            val errorMsg = if (!errorBody.isNullOrBlank()) {
-                try {
-                    val json = JSONObject(errorBody)
-                    json.optJSONObject("error")?.optString("message", "") ?: errorBody
-                } catch (_: Exception) { errorBody }
-            } else e.message()
+        val results = mutableListOf<String>()
+        var successCount = 0
 
-            if (code == 400 || code == 401 || code == 403) {
-                Result.failure(ApiKeyInvalidException("Invalid API key (HTTP $code): $errorMsg"))
-            } else if (code == 429) {
-                Result.success("✅ Key is valid, but current quota/rate limit is reached.")
-            } else {
-                Result.failure(Exception("HTTP $code: $errorMsg"))
+        for ((idx, key) in keys.withIndex()) {
+            val label = if (keys.size > 1) "Key #${idx + 1}" else "Key"
+            val request = GenerateContentRequest(
+                contents = listOf(Content(parts = listOf(Part(text = "Hello")))),
+                generationConfig = GenerationConfig(temperature = 0.1f)
+            )
+            try {
+                val (workingModel, response) = executeWithModelFallback(key, request)
+                if (response.candidates?.isNotEmpty() == true) {
+                    results.add("$label: ✅ Valid ($workingModel)")
+                    successCount++
+                } else {
+                    results.add("$label: ✅ Connected ($workingModel)")
+                    successCount++
+                }
+            } catch (e: retrofit2.HttpException) {
+                val code = e.code()
+                val errorBody = try { e.response()?.errorBody()?.string() } catch (_: Exception) { null }
+                val errorMsg = if (!errorBody.isNullOrBlank()) {
+                    try {
+                        val json = JSONObject(errorBody)
+                        json.optJSONObject("error")?.optString("message", "") ?: errorBody
+                    } catch (_: Exception) { errorBody }
+                } else e.message()
+
+                if (code == 400 || code == 401 || code == 403) {
+                    results.add("$label: ❌ Invalid (HTTP $code)")
+                } else if (code == 429) {
+                    results.add("$label: ⏳ Valid (Rate limit cooling down)")
+                    successCount++
+                } else {
+                    results.add("$label: ❌ HTTP $code ($errorMsg)")
+                }
+            } catch (e: Throwable) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                results.add("$label: ❌ ${e.localizedMessage ?: "Connection error"}")
             }
-        } catch (e: Throwable) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-            Result.failure(Exception(e.localizedMessage ?: "Connection error", e))
+        }
+
+        if (successCount > 0) {
+            Result.success(results.joinToString(" · "))
+        } else {
+            Result.failure(Exception(results.joinToString(" · ")))
         }
     }
 

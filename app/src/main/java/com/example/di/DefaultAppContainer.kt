@@ -28,7 +28,11 @@ object DefaultAppContainer {
 
     fun getGeminiRepository(context: Context): GeminiRepository {
         val keyManager = getApiKeyManager(context)
-        return GeminiRepository(apiKeyProvider = { keyManager.getApiKey() })
+        return GeminiRepository(
+            apiKeyProvider = { keyManager.getApiKey() },
+            keyPoolProvider = { keyManager.getApiKeys() },
+            onKeyRotate = { failedKey -> keyManager.rotateGeminiKey(failedKey) }
+        )
     }
 
     fun getNvidiaRepository(context: Context): NvidiaRepository {

@@ -910,9 +910,10 @@ fun CallScribeApp(viewModel: CallViewModel) {
                     OutlinedTextField(
                         value = enteredApiKey,
                         onValueChange = { enteredApiKey = it; apiKeyTestResult = null },
-                        label = { Text("Gemini Key (AIzaSy...)", fontWeight = FontWeight.Bold) },
-                        placeholder = { Text("Paste AIzaSy... key") },
-                        singleLine = true,
+                        label = { Text("Gemini Key(s) (AIzaSy...)", fontWeight = FontWeight.Bold) },
+                        placeholder = { Text("Paste key (or multiple keys separated by commas)") },
+                        singleLine = false,
+                        maxLines = 3,
                         visualTransformation = if (apiKeyVisible) VisualTransformation.None else PasswordVisualTransformation(),
                         trailingIcon = {
                             IconButton(onClick = { apiKeyVisible = !apiKeyVisible }) {
@@ -926,6 +927,23 @@ fun CallScribeApp(viewModel: CallViewModel) {
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(8.dp)
                     )
+                    Spacer(modifier = Modifier.height(3.dp))
+                    Surface(
+                        color = Color(0xFFF0FDF4),
+                        shape = RoundedCornerShape(6.dp),
+                        border = BorderStroke(1.dp, Color(0xFF86EFAC)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(modifier = Modifier.padding(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Info, contentDescription = null, tint = Color(0xFF15803D), modifier = Modifier.size(13.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = "💡 Pro Tip: Paste multiple keys separated by commas (e.g. from 2 Gmail accounts) for automatic rotation and zero rate limits!",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF14532D)
+                            )
+                        }
+                    }
                     Spacer(modifier = Modifier.height(4.dp))
                     apiKeyTestResult?.let { (success, msg) ->
                         Row(verticalAlignment = Alignment.CenterVertically) {

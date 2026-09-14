@@ -13,24 +13,53 @@ class ApiKeyManager(context: Context) {
 
     // ── Gemini ──────────────────────────────────────────────────────────────
 
-    fun getApiKey(): String {
-        val userKey = prefs.getString(KEY_GEMINI_API_KEY, "")?.trim() ?: ""
-        if (userKey.isNotBlank()) return userKey
+    /**
+     * Returns all configured Gemini API keys (supports comma, semicolon, newline, or whitespace separation).
+     * If user configured multiple keys, returns all of them for automatic failover rotation.
+     */
+    fun getApiKeys(): List<String> {
+        val userRaw = prefs.getString(KEY_GEMINI_API_KEY, "")?.trim() ?: ""
+        if (userRaw.isNotBlank()) {
+            val parsed = userRaw.split(',', ';', '\n', '\r')
+                .map { it.trim() }
+                .filter { it.length > 10 && !it.equals("MY_GEMINI_API_KEY", ignoreCase = true) && !it.equals("YOUR_API_KEY", ignoreCase = true) }
+            if (parsed.isNotEmpty()) return parsed
+        }
         val buildKey = BuildConfig.GEMINI_API_KEY.trim()
         if (buildKey.isNotBlank() &&
             !buildKey.equals("MY_GEMINI_API_KEY", ignoreCase = true) &&
-            !buildKey.equals("YOUR_API_KEY", ignoreCase = true)
-        ) return buildKey
-        return ""
+            !buildKey.equals("YOUR_API_KEY", ignoreCase = true) &&
+            buildKey.length > 10
+        ) {
+            return listOf(buildKey)
+        }
+        return emptyList()
+    }
+
+    fun getApiKey(): String {
+        return getApiKeys().firstOrNull() ?: ""
     }
 
     fun setApiKey(apiKey: String) {
         prefs.edit().putString(KEY_GEMINI_API_KEY, apiKey.trim()).apply()
     }
 
+    /**
+     * Rotates failedKey to the end of the key pool so subsequent requests
+     * automatically try the next active backup key first.
+     */
+    fun rotateGeminiKey(failedKey: String) {
+        val keys = getApiKeys().toMutableList()
+        val matchIdx = keys.indexOfFirst { it.equals(failedKey.trim(), ignoreCase = true) }
+        if (matchIdx != -1 && keys.size > 1) {
+            val failed = keys.removeAt(matchIdx)
+            keys.add(failed)
+            prefs.edit().putString(KEY_GEMINI_API_KEY, keys.joinToString(",")).apply()
+        }
+    }
+
     fun isConfigured(): Boolean {
-        val key = getApiKey()
-        return key.isNotBlank() && key.length > 10
+        return getApiKeys().isNotEmpty()
     }
 
     fun clearApiKey() {

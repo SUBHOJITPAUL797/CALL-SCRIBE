@@ -1306,9 +1306,9 @@ class CallViewModel(
                         if (base64Audio != null) {
                             var geminiResult = geminiRepository.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
 
-                            // If rate limit (429) hit, wait 3 seconds and retry once
+                            // If rate limit (429) hit, wait 5 seconds and retry once
                             if (geminiResult.exceptionOrNull() is ApiQuotaExceededException) {
-                                kotlinx.coroutines.delay(3000)
+                                kotlinx.coroutines.delay(5000)
                                 geminiResult = geminiRepository.transcribeAndSummarizeAudio(base64Audio, resolvedMime)
                             }
 
@@ -1574,9 +1574,9 @@ class CallViewModel(
                         android.util.Log.e("CallScribe", "Analysis failed for id=${recording.id}: ${err?.localizedMessage}", err)
                         val isGemini429 = (err is ApiQuotaExceededException || (err?.message?.contains("429") == true && preferredEngine.value == PreferredEngine.GEMINI))
                         if (isGemini429) {
-                            updateStatusMessage.value = "⏳ Gemini rate limit reached (15 calls/min). Resets in 60s. Please wait!"
+                            updateStatusMessage.value = "⏳ Google AI Studio 1-minute speed limit reached. Daily 1,500 calls active! Resets in 30–60s."
                         } else if (err?.message?.contains("429") == true) {
-                            updateStatusMessage.value = "⏳ Rate limit reached. Resets in 60s. Please wait!"
+                            updateStatusMessage.value = "⏳ 1-minute speed limit reached. Resets in 30–60s. Please wait!"
                         } else {
                             val rawMsg = err?.localizedMessage ?: err?.javaClass?.simpleName ?: "Unknown error"
                             val cleanMsg = when {
