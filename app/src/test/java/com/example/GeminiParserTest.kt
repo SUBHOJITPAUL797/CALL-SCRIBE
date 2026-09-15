@@ -161,4 +161,12 @@ class GeminiParserTest {
         assertEquals(cleanKey, variations.first())
         assertTrue(variations.contains("MOCK_GEMINI_KEY_SAMPLE_Oj_TAIL"))
     }
+
+    @Test
+    fun testParseConfiguredKeysWithLineWrap() {
+        val wrappedKey = "AQ.PartOneOfTheKeySample12345\nPartTwoOfTheKeySample67890"
+        val parsed = GeminiRepository.parseConfiguredKeys(wrappedKey)
+        assertEquals(1, parsed.size)
+        assertEquals("AQ.PartOneOfTheKeySample12345PartTwoOfTheKeySample67890", parsed.first())
+    }
 }

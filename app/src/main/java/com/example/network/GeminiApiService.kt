@@ -177,6 +177,31 @@ class GeminiRepository(
             "gemini-1.5-pro"
         )
 
+        fun parseConfiguredKeys(raw: String): List<String> {
+            val clean = raw.trim().replace("\"", "").replace("'", "").replace("`", "")
+            if (clean.isBlank()) return emptyList()
+
+            val lines = clean.split('\n', '\r').map { it.trim() }.filter { it.isNotBlank() }
+            val unifiedLines = mutableListOf<String>()
+            for (line in lines) {
+                if (unifiedLines.isEmpty()) {
+                    unifiedLines.add(line)
+                } else {
+                    val last = unifiedLines.last()
+                    if (!line.startsWith("AQ.") && !line.startsWith("AIza") && !line.contains(",") && last.length < 50) {
+                        unifiedLines[unifiedLines.size - 1] = last + line
+                    } else {
+                        unifiedLines.add(line)
+                    }
+                }
+            }
+
+            return unifiedLines.flatMap { it.split(',', ';') }
+                .map { it.trim().replace(" ", "") }
+                .filter { it.length > 10 && !it.equals("MY_GEMINI_API_KEY", ignoreCase = true) && !it.equals("YOUR_API_KEY", ignoreCase = true) }
+                .distinct()
+        }
+
         fun getKeyVariations(rawKey: String): List<String> {
             val trimmed = rawKey.trim().replace("\"", "").replace("'", "").replace("`", "")
             val list = mutableListOf<String>()
@@ -203,10 +228,8 @@ class GeminiRepository(
         val pool = keyPoolProvider?.invoke()?.filter { it.length > 10 }
         if (!pool.isNullOrEmpty()) return pool
         val raw = apiKeyProvider().trim()
-        val split = raw.split(',', ';', '\n', '\r')
-            .map { it.trim().replace("\"", "").replace("'", "").replace("`", "") }
-            .filter { it.length > 10 && !it.equals("MY_GEMINI_API_KEY", ignoreCase = true) && !it.equals("YOUR_API_KEY", ignoreCase = true) }
-        return if (split.isNotEmpty()) split else if (raw.length > 10) listOf(raw) else emptyList()
+        val parsed = parseConfiguredKeys(raw)
+        return if (parsed.isNotEmpty()) parsed else if (raw.length > 10) listOf(raw) else emptyList()
     }
 
     /**
@@ -251,7 +274,7 @@ class GeminiRepository(
         request: GenerateContentRequest
     ): Pair<String, GenerateContentResponse> {
         val baseKeys = if (apiKey.isNotBlank()) {
-            apiKey.split(',', ';', '\n', '\r').map { it.trim().replace("\"", "").replace("'", "").replace("`", "") }.filter { it.length > 10 }
+            parseConfiguredKeys(apiKey)
         } else {
             getAllKeys()
         }.ifEmpty { listOf(apiKey.trim().replace("\"", "").replace("'", "").replace("`", "")) }
@@ -462,9 +485,7 @@ Do NOT skip any section. Do NOT summarize too briefly. The user needs to know ev
     }
 
     suspend fun testApiKey(apiKey: String): Result<String> = withContext(Dispatchers.IO) {
-        val keys = apiKey.split(',', ';', '\n', '\r')
-            .map { it.trim() }
-            .filter { it.length > 10 }
+        val keys = parseConfiguredKeys(apiKey)
 
         if (keys.isEmpty()) {
             return@withContext Result.failure(Exception("API Key is too short or empty."))

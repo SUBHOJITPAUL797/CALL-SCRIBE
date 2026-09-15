@@ -916,12 +916,24 @@ fun CallScribeApp(viewModel: CallViewModel) {
                         maxLines = 3,
                         visualTransformation = if (apiKeyVisible) VisualTransformation.None else PasswordVisualTransformation(),
                         trailingIcon = {
-                            IconButton(onClick = { apiKeyVisible = !apiKeyVisible }) {
-                                Icon(
-                                    imageVector = if (apiKeyVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                    contentDescription = "Toggle visibility",
-                                    tint = Color.Black
-                                )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (enteredApiKey.isNotBlank()) {
+                                    IconButton(onClick = { enteredApiKey = ""; apiKeyTestResult = null }) {
+                                        Icon(
+                                            imageVector = Icons.Default.Close,
+                                            contentDescription = "Clear API Key",
+                                            tint = Color.Gray,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                                IconButton(onClick = { apiKeyVisible = !apiKeyVisible }) {
+                                    Icon(
+                                        imageVector = if (apiKeyVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                        contentDescription = "Toggle visibility",
+                                        tint = Color.Black
+                                    )
+                                }
                             }
                         },
                         modifier = Modifier.fillMaxWidth(),
@@ -958,19 +970,41 @@ fun CallScribeApp(viewModel: CallViewModel) {
                         }
                         Spacer(Modifier.height(2.dp))
                     }
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        OutlinedButton(
-                            onClick = {
-                                if (enteredApiKey.isNotBlank() && !isTestingKey) {
-                                    isTestingKey = true; apiKeyTestResult = null
-                                    viewModel.testApiKey(enteredApiKey) { ok, msg -> apiKeyTestResult = Pair(ok, msg); isTestingKey = false }
-                                }
-                            },
-                            enabled = enteredApiKey.isNotBlank() && !isTestingKey,
-                            shape = RoundedCornerShape(8.dp), border = BorderStroke(2.dp, Color.Black)
+                    val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            if (isTestingKey) { CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 2.dp, color = Color.Black); Spacer(Modifier.width(4.dp)) }
-                            Text(if (isTestingKey) "Testing..." else "Test", fontWeight = FontWeight.Bold, color = Color.Black, style = MaterialTheme.typography.labelMedium)
+                            OutlinedButton(
+                                onClick = {
+                                    if (enteredApiKey.isNotBlank() && !isTestingKey) {
+                                        isTestingKey = true; apiKeyTestResult = null
+                                        viewModel.testApiKey(enteredApiKey) { ok, msg -> apiKeyTestResult = Pair(ok, msg); isTestingKey = false }
+                                    }
+                                },
+                                enabled = enteredApiKey.isNotBlank() && !isTestingKey,
+                                shape = RoundedCornerShape(8.dp), border = BorderStroke(2.dp, Color.Black)
+                            ) {
+                                if (isTestingKey) { CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 2.dp, color = Color.Black); Spacer(Modifier.width(4.dp)) }
+                                Text(if (isTestingKey) "Testing..." else "Test", fontWeight = FontWeight.Bold, color = Color.Black, style = MaterialTheme.typography.labelMedium)
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    val clipText = clipboardManager.getText()?.text?.trim() ?: ""
+                                    if (clipText.isNotBlank()) {
+                                        enteredApiKey = clipText.replace("\"", "").replace("'", "").replace("`", "").trim()
+                                        apiKeyTestResult = null
+                                    }
+                                },
+                                shape = RoundedCornerShape(8.dp), border = BorderStroke(1.5.dp, Color.Black)
+                            ) {
+                                Text("📋 Paste", fontWeight = FontWeight.Bold, color = Color.Black, style = MaterialTheme.typography.labelMedium)
+                            }
                         }
                         TextButton(onClick = {
                             try { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/app/apikey")).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }) } catch (_: Exception) {}

@@ -14,15 +14,41 @@ class ApiKeyManager(context: Context) {
     // ── Gemini ──────────────────────────────────────────────────────────────
 
     /**
+     * Parses and cleans configured keys, automatically stitching together accidental line wraps.
+     */
+    fun parseConfiguredKeys(raw: String): List<String> {
+        val clean = raw.trim().replace("\"", "").replace("'", "").replace("`", "")
+        if (clean.isBlank()) return emptyList()
+
+        val lines = clean.split('\n', '\r').map { it.trim() }.filter { it.isNotBlank() }
+        val unifiedLines = mutableListOf<String>()
+        for (line in lines) {
+            if (unifiedLines.isEmpty()) {
+                unifiedLines.add(line)
+            } else {
+                val last = unifiedLines.last()
+                if (!line.startsWith("AQ.") && !line.startsWith("AIza") && !line.contains(",") && last.length < 50) {
+                    unifiedLines[unifiedLines.size - 1] = last + line
+                } else {
+                    unifiedLines.add(line)
+                }
+            }
+        }
+
+        return unifiedLines.flatMap { it.split(',', ';') }
+            .map { it.trim().replace(" ", "") }
+            .filter { it.length > 10 && !it.equals("MY_GEMINI_API_KEY", ignoreCase = true) && !it.equals("YOUR_API_KEY", ignoreCase = true) }
+            .distinct()
+    }
+
+    /**
      * Returns all configured Gemini API keys (supports comma, semicolon, newline, or whitespace separation).
      * If user configured multiple keys, returns all of them for automatic failover rotation.
      */
     fun getApiKeys(): List<String> {
         val userRaw = prefs.getString(KEY_GEMINI_API_KEY, "")?.trim() ?: ""
         if (userRaw.isNotBlank()) {
-            val parsed = userRaw.split(',', ';', '\n', '\r')
-                .map { it.trim().replace("\"", "").replace("'", "").replace("`", "") }
-                .filter { it.length > 10 && !it.equals("MY_GEMINI_API_KEY", ignoreCase = true) && !it.equals("YOUR_API_KEY", ignoreCase = true) }
+            val parsed = parseConfiguredKeys(userRaw)
             if (parsed.isNotEmpty()) return parsed
         }
         val buildKey = BuildConfig.GEMINI_API_KEY.trim().replace("\"", "").replace("'", "").replace("`", "")
@@ -41,7 +67,8 @@ class ApiKeyManager(context: Context) {
     }
 
     fun setApiKey(apiKey: String) {
-        val clean = apiKey.trim().replace("\"", "").replace("'", "").replace("`", "")
+        val keys = parseConfiguredKeys(apiKey)
+        val clean = keys.joinToString(",")
         prefs.edit().putString(KEY_GEMINI_API_KEY, clean).apply()
     }
 
